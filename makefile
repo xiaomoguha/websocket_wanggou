@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -lpthread -lwebsockets
+CFLAGS := -lpthread -lwebsockets -lcurl
 SRC_DIR := src
 OBJ_DIR := obj
 BUILD_DIR := bin

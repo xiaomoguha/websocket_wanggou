@@ -128,7 +128,7 @@ static void operation_response(client_info_t *client, const char *msg)
 {
     if(!msg || !client)
         return;
-    success_response(client, msg);
+    success_response(client, "操作成功");
     pthread_mutex_lock(&client->room->lock);
     strncpy(client->room->latest_msg, msg, sizeof(client->room->latest_msg) - 1);
     pthread_mutex_unlock(&client->room->lock);
@@ -446,7 +446,6 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 {
                     if (playbysonghash(client->room,songhash->valuestring)>=0)
                     {
-                        success_response(client, "success");
                         const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
                         operation_response(client, cur_song_info_json);
                         return 0;
@@ -464,7 +463,6 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         case PAUSE_SONG:
             if(pause_song(client->room)>=0)
             {
-                success_response(client, "success");
                 const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
                 operation_response(client, cur_song_info_json);
             }
@@ -476,7 +474,6 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         case RESUME_SONG:
             if(resume_song(client->room)>=0)
             {
-                success_response(client, "success");
                 const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
                 operation_response(client, cur_song_info_json);
             }
@@ -487,18 +484,16 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             break;
         case ADD_SONG_TO_PLAYLIST:
             if(cJSON_IsObject(params))
-            { 
+            {
+                char *songname = cJSON_GetObjectItem(params, "songname")?cJSON_GetObjectItem(params, "songname")->valuestring:"";
+                char *songhash = cJSON_GetObjectItem(params, "songhash")?cJSON_GetObjectItem(params, "songhash")->valuestring:"";
+                char *singername = cJSON_GetObjectItem(params, "singername")?cJSON_GetObjectItem(params, "singername")->valuestring:"";
+                char *albumname = cJSON_GetObjectItem(params, "albumname")?cJSON_GetObjectItem(params, "albumname")->valuestring:"";
+                char *duration = cJSON_GetObjectItem(params, "duration")?cJSON_GetObjectItem(params, "duration")->valuestring:"";
+                char *coverurl = cJSON_GetObjectItem(params, "coverurl")?cJSON_GetObjectItem(params, "coverurl")->valuestring:"";
                 if (insert_song_to_playlist(client->room,
-                                           cJSON_GetObjectItem(params, "songname")->valuestring,
-                                           cJSON_GetObjectItem(params, "songhash")->valuestring,
-                                           cJSON_GetObjectItem(params, "singername")->valuestring,
-                                           cJSON_GetObjectItem(params, "albumname")->valuestring,
-                                           cJSON_GetObjectItem(params, "duration")->valuestring,
-                                           cJSON_GetObjectItem(params, "lyrics")->valuestring,
-                                           cJSON_GetObjectItem(params, "coverurl")->valuestring)
-                >=0)
+                                            songname, songhash, singername, albumname, duration, coverurl)>=0)
                 {
-                    success_response(client, "success");
                     const char *cur_playlist_json = get_playlist_json(client->room,BROADCAST_SONG_LIST);
                     operation_response(client, cur_playlist_json);
                 }
@@ -519,7 +514,6 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 if(remove_song_from_playlist(client->room,
                                              cJSON_GetObjectItem(params, "songhash")->valuestring)>=0)
                 {
-                    success_response(client, "success");
                     const char *cur_playlist_json = get_playlist_json(client->room,BROADCAST_SONG_LIST);
                     operation_response(client, cur_playlist_json);
                 }
@@ -539,7 +533,6 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 if(upsongbyhash(client->room,
                                  cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
                 {
-                    success_response(client, "success");
                     const char *cur_playlist_json = get_playlist_json(client->room,BROADCAST_SONG_LIST);
                     operation_response(client, cur_playlist_json);
                 }
@@ -657,11 +650,13 @@ int main(int argc, const char **argv)
 {
     struct lws_context_creation_info info;
     const char *iface = NULL;
-    int port = 8080;
+    int port = 3375;
     int opts = 0;
 
     // 初始化日志系统
     lws_set_log_level(LLL_NOTICE | LLL_ERR, NULL);
+    // 初始化 http—get
+    curl_global_init(CURL_GLOBAL_ALL);
 
     g_rooms_list = init_rooms();
     if (!g_rooms_list)
