@@ -403,6 +403,12 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     cJSON *userid = cJSON_GetObjectItem(root, "userid");
     cJSON *action = cJSON_GetObjectItem(root, "action");
     cJSON *params = cJSON_GetObjectItem(root, "params");
+    cJSON *type = cJSON_GetObjectItem(root, "type");
+    if (cJSON_IsString(type) && !strncmp(type->valuestring, "heartbeat", 9))
+    {
+        success_response(client, "heartbeat");
+        return 0;
+    }
 
     if (!cJSON_IsNumber(action))
     {
