@@ -2,7 +2,8 @@
 #define TYPES_H
 #include <arpa/inet.h>
 #include <libwebsockets.h>
-
+#include <time.h>
+// 歌曲信息
 typedef struct playlist
 {
     char song_name[128];
@@ -14,9 +15,10 @@ typedef struct playlist
     char cover_url[256];
     struct playlist *next;
 } playlist_t;
+// 正在播放的歌曲信息
 typedef struct playing_info
 {
-    lws_sorted_usec_list_t timer; // 定时器
+    lws_sorted_usec_list_t timer;
     char song_name[128];
     char song_hash[128];
     char song_url[256];
@@ -26,26 +28,35 @@ typedef struct playing_info
     char lyrics_url[256];
     char cover_url[256];
     double played_percent;
-    char is_playing; // 1表示正在播放，0表示暂停
+    char is_playing;
     time_t start_time;
     time_t last_update_time;
     struct rooms *room;
     pthread_mutex_t lock;
 } playing_info_t;
-
-typedef struct client_info 
+// 客户端信息
+typedef struct client_info
 {
     struct lws *wsi;
     char ip[INET_ADDRSTRLEN];
-    struct rooms *room;//对应房间节点
+    struct rooms *room; // 对应房间节点
     char userId[64];
-    char latest_msg[1024];//服务器单独回复信息
-    char is_data_to_send;//是否有数据需要发送
+    char latest_msg[1024]; // 服务器单独回复信息
+    char is_data_to_send;  // 是否有数据需要发送
     struct client_info *next;
     struct client_info *prev;
     pthread_mutex_t lock;
 } client_info_t;
-
+// 房间操作信息
+typedef struct room_ctrl
+{
+    char userid[64];
+    char action;
+    char action_message[512];
+    time_t action_time;
+    struct room_ctrl *next;
+} room_ctrl_t;
+// 房间信息
 typedef struct rooms
 {
     char room_id[64];
@@ -57,12 +68,11 @@ typedef struct rooms
     playlist_t *playlist_head;
     playlist_t *playlist_tail;
     playlist_t *current_song;
+    room_ctrl_t *room_ctrl_head;
     playing_info_t playing_info;
     struct rooms *next;
 } rooms_t;
-
-
-
+// 操作枚举
 enum ctrl
 {
     GET_CUR_SONG_INFO = 200,
@@ -76,7 +86,10 @@ enum ctrl
     GET_PLAYLIST,
     BROADCAST_SONG_INFO,
     BROADCAST_SONG_LIST,
+    BROADCAST_CLIENT_LIST,
+    GET_CLEIENT_LIST,
 };
+
 enum CODE
 {
     SUCCESS,

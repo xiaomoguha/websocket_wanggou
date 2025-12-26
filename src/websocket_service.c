@@ -15,7 +15,7 @@ static void error_response(client_info_t *client, const char *msg);
 struct lws_context *context = NULL;
 static int interrupted = 0;
 
-rooms_t *g_rooms_list = NULL;//房间链表
+rooms_t *g_rooms_list = NULL; // 房间链表
 
 // 定义协议处理结构
 static struct lws_protocols protocols[] = {
@@ -28,16 +28,16 @@ static struct lws_protocols protocols[] = {
     {NULL, NULL, 0, 0} // 协议列表结束标记
 };
 
-//头插法插入客户端节点
-bool insert_client_node(client_info_t *head,client_info_t *new_node)
+// 头插法插入客户端节点
+bool insert_client_node(client_info_t *head, client_info_t *new_node)
 {
-    if(head == NULL || new_node == NULL)
+    if (head == NULL || new_node == NULL)
     {
         return false;
     }
     new_node->next = head->next;
     new_node->prev = head;
-    if(head->next != NULL)
+    if (head->next != NULL)
     {
         head->next->prev = new_node;
     }
@@ -45,8 +45,8 @@ bool insert_client_node(client_info_t *head,client_info_t *new_node)
     return true;
 }
 
-//申请节点并填充客户端信息,返回改节点指针
-client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room,const char *userId)
+// 申请节点并填充客户端信息,返回改节点指针
+client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room, const char *userId)
 {
     client_info_t *new_node = (client_info_t *)malloc(sizeof(client_info_t));
     if (!new_node)
@@ -55,7 +55,7 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
         return false;
     }
     memset(new_node, 0, sizeof(client_info_t));
-    pthread_mutex_init(&new_node->lock,NULL);
+    pthread_mutex_init(&new_node->lock, NULL);
     new_node->wsi = wsi;
     strncpy(new_node->ip, ip, INET_ADDRSTRLEN - 1);
     new_node->room = room;
@@ -73,7 +73,7 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
 }
 
 // 对应房间客户端发送广播消息
-void submit_broadcast_message(struct lws *wsi,const char *msg)
+void submit_broadcast_message(struct lws *wsi, const char *msg)
 {
     if (!msg)
     {
@@ -91,28 +91,26 @@ void submit_broadcast_message(struct lws *wsi,const char *msg)
     client->room->latest_msg[sizeof(client->room->latest_msg) - 1] = '\0';
     pthread_mutex_unlock(&client->room->lock);
 
-
-    //遍历该房间客户端链表，唤醒对应客户端发送信息
-    for(client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
+    // 遍历该房间客户端链表，唤醒对应客户端发送信息
+    for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
     {
         if (cur->wsi)
         {
             lws_callback_on_writable(cur->wsi);
         }
-
     }
     lws_cancel_service(context);
 }
 
-//对应房间发送广播信息
+// 对应房间发送广播信息
 static void broadcast_response_room(rooms_t *room, const char *msg)
-{ 
+{
     pthread_mutex_lock(&room->lock);
     strncpy(room->latest_msg, msg, sizeof(room->latest_msg));
     room->latest_msg[sizeof(room->latest_msg) - 1] = '\0';
     pthread_mutex_unlock(&room->lock);
 
-    //遍历所有用户
+    // 遍历所有用户
     for (client_info_t *cur = room->client_info->next; cur; cur = cur->next)
     {
         if (cur->wsi)
@@ -122,26 +120,27 @@ static void broadcast_response_room(rooms_t *room, const char *msg)
     }
 }
 
-
-//操作回复广播（操作者回复成功与否，其他客户端回复最新数据）
+// 操作回复广播（操作者回复成功与否，其他客户端回复最新数据）
 static void operation_response(client_info_t *client, const char *msg)
 {
-    if(!msg || !client)
+    if (!msg || !client)
         return;
+
+    // 操作客户端回复
     success_response(client, "操作成功");
+
     pthread_mutex_lock(&client->room->lock);
     strncpy(client->room->latest_msg, msg, sizeof(client->room->latest_msg) - 1);
     pthread_mutex_unlock(&client->room->lock);
 
-    //遍历该房间客户端链表，唤醒对应客户端发送信息（除创建者）
-    for(client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
+    // 遍历该房间客户端链表，唤醒对应客户端发送信息（除创建者）
+    for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
     {
         if (cur->wsi && client != cur)
         {
             lws_callback_on_writable(cur->wsi);
         }
     }
-
 }
 
 // 信号处理函数，用于优雅退出
@@ -168,31 +167,36 @@ static void print_room_info(rooms_t *room)
     }
 }
 
-//定时更新进度
+// 定时更新进度
 void timer_callback(lws_sorted_usec_list_t *sul)
 {
     float duration = 0;
     playing_info_t *playing_info = lws_container_of(sul, playing_info_t, timer);
-    int callback_time = playing_info->is_playing ? 1000 : 10000;
+    int callback_time = playing_info->is_playing ? 5000 : 15000;
     if (playing_info->is_playing)
     {
         pthread_mutex_lock(&playing_info->lock);
         duration = atof(playing_info->duration);
         time_t now = time(NULL);
-        //更新进度偏移
+        // 更新进度偏移
         double offset = (now - playing_info->last_update_time) / duration;
         playing_info->played_percent += offset;
         playing_info->last_update_time = now;
+        // 要是接近播放完成的话，加快广播频率
+        if (playing_info->played_percent >= 0.95)
+        {
+            callback_time = 500;
+        }
         pthread_mutex_unlock(&playing_info->lock);
     }
-    if(playing_info->played_percent >= 1)
+    if (playing_info->played_percent >= 1)
     {
-        play_next_song(playing_info->room);
+        play_next_song_bysystem(playing_info->room);
     }
-    //广播播放信息(有歌曲的时候)
-    if(playing_info->room->current_song)
+    // 广播播放信息(有歌曲的时候)
+    if (playing_info->room->current_song)
     {
-        const char *cur_song_info_json = get_cur_song_info(playing_info->room, BROADCAST_SONG_INFO);
+        const char *cur_song_info_json = get_cur_played_percent(playing_info->room);
         broadcast_response_room(playing_info->room, cur_song_info_json);
     }
 
@@ -215,7 +219,7 @@ static int client_callback_established(struct lws *wsi)
     }
 
     lws_get_peer_simple(wsi, client_ip, sizeof(client_ip));
-    if(!strlen(client_ip))
+    if (!strlen(client_ip))
     {
         lwsl_err("无法获取客户端IP，断开连接\n");
         return -1;
@@ -224,7 +228,7 @@ static int client_callback_established(struct lws *wsi)
     lws_get_urlarg_by_name(wsi, "roomid", roomid, sizeof(roomid));
     lws_get_urlarg_by_name(wsi, "userid", userId, sizeof(userId));
 
-    if(!strlen(roomid) || !strlen(userId))
+    if (!strlen(roomid) || !strlen(userId))
     {
         lwsl_err("缺少必要的查询参数，断开连接\n");
         return -1;
@@ -246,10 +250,12 @@ static int client_callback_established(struct lws *wsi)
             {
                 print_room_info(room);
             }
+            // 广播新的客户端信息
+            broadcast_response_room(room, get_client_list_json(room, BROADCAST_CLIENT_LIST));
             return 0;
         }
     }
-    //创建新房间
+    // 创建新房间
     lwsl_notice("创建新房间: %s\n", roomid);
     if (!(new_room = insert_room_info(roomid, userId, g_rooms_list)))
     {
@@ -265,8 +271,8 @@ static int client_callback_established(struct lws *wsi)
     }
     lws_set_opaque_user_data(wsi, new_client);
     lwsl_notice("客户端加入房间: %s\n", roomid);
-    //打印房间信息以及客户端信息
-    for(rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
+    // 打印房间信息以及客户端信息
+    for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
     {
         print_room_info(room);
     }
@@ -276,7 +282,7 @@ static int client_callback_established(struct lws *wsi)
 static int client_callback_closed(struct lws *wsi)
 {
     lwsl_notice("客户端连接关闭\n");
-    //清理客户端节点
+    // 清理客户端节点
     client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
     rooms_t *room = client->room;
     if (!client)
@@ -299,7 +305,7 @@ static int client_callback_closed(struct lws *wsi)
         }
         if (client->room->client_info == client)
         {
-            client->room->client_info = next; //如果是头节点，更新头节点
+            client->room->client_info = next; // 如果是头节点，更新头节点
         }
         client->room->client_counter--;
         pthread_mutex_unlock(&client->room->lock);
@@ -308,7 +314,7 @@ static int client_callback_closed(struct lws *wsi)
     }
     lws_set_opaque_user_data(wsi, NULL);
 
-    //如果房间已经没有客户端，则删除房间信息
+    // 如果房间已经没有客户端，则删除房间信息
     if (room->client_counter == 0)
     {
         remove_room_node(g_rooms_list, room);
@@ -350,7 +356,7 @@ static void error_response(client_info_t *client, const char *msg)
     lws_cancel_service(context);
 }
 
-static void success_response(client_info_t *client,const char *msg)
+static void success_response(client_info_t *client, const char *msg)
 {
     // 1. 创建根对象 {}
     cJSON *root = cJSON_CreateObject();
@@ -375,6 +381,18 @@ static void success_response(client_info_t *client,const char *msg)
     lws_callback_on_writable(client->wsi);
     lws_cancel_service(context);
 }
+// 某客户端单独发送信息
+static void send_message_to_client(client_info_t *client, const char *msg)
+{
+    if (!client)
+        return;
+    pthread_mutex_lock(&client->lock);
+    strncpy(client->latest_msg, msg, sizeof(client->latest_msg) - 1);
+    client->is_data_to_send = 1;
+    pthread_mutex_unlock(&client->lock);
+    lws_callback_on_writable(client->wsi);
+    lws_cancel_service(context);
+}
 
 static int client_callback_receive(struct lws *wsi, void *in, size_t len)
 {
@@ -384,7 +402,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         lwsl_err("Client info is NULL\n");
         return -1;
     }
-    ((char *)in)[len] = '\0'; //确保消息以null结尾
+    ((char *)in)[len] = '\0'; // 确保消息以null结尾
     lwsl_notice("收到%s消息: %s (长度: %zu)\n", client->ip, (char *)in, len);
 
     cJSON *root = cJSON_Parse((char *)in);
@@ -416,161 +434,144 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         error_response(client, "action类型错误！");
         return 0;
     }
-    switch(action->valueint)
+    if (!cJSON_IsString(userid) || strncmp(userid->valuestring, client->userId, strlen(userid->valuestring)))
     {
-        case GET_CUR_SONG_INFO:
-            const char *cur_song_info_json = get_cur_song_info(client->room,GET_CUR_SONG_INFO);
-            if (cur_song_info_json)
+        lwsl_err("userid错误！");
+        error_response(client, "userid错误！");
+        return 0;
+    }
+    switch (action->valueint)
+    {
+    case GET_CUR_SONG_INFO:
+        const char *cur_song_info_json = get_cur_song_info(client->room, GET_CUR_SONG_INFO);
+        cur_song_info_json ? send_message_to_client(client, cur_song_info_json) : error_response(client, "fail!");
+        break;
+    case PLAY_NEXT_SONG:
+        if (play_next_song(client) >= 0)
+        {
+            const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
+            operation_response(client, cur_song_info_json);
+        }
+        else
+        {
+            error_response(client, "fail!");
+        }
+        break;
+    case PLAY_BY_SONG_HASH:
+        if (cJSON_IsObject(params))
+        {
+            cJSON *songhash = cJSON_GetObjectItem(params, "songhash");
+            if (cJSON_IsString(songhash))
             {
-                pthread_mutex_lock(&client->lock);
-                strncpy(client->latest_msg, cur_song_info_json, sizeof(client->latest_msg));
-                client->is_data_to_send = 1;
-                pthread_mutex_unlock(&client->lock);
-                lws_callback_on_writable(client->wsi);
-                lws_cancel_service(context);
-            }
-            else{
-                error_response(client, "fail!");
-            }
-            break;
-        case PLAY_NEXT_SONG:
-            if (play_next_song(client->room)>=0)
-            {
-                const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
-                operation_response(client, cur_song_info_json);
-            }
-            else
-            {
-                error_response(client, "fail!");
-            }
-            break;
-        case PLAY_BY_SONG_HASH:
-            if(cJSON_IsObject(params))
-            {
-                cJSON *songhash = cJSON_GetObjectItem(params, "songhash");
-                if(cJSON_IsString(songhash))
+                if (playbysonghash(client, songhash->valuestring) >= 0)
                 {
-                    if (playbysonghash(client->room,songhash->valuestring)>=0)
-                    {
-                        const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
-                        operation_response(client, cur_song_info_json);
-                        return 0;
-                    }
-                }
-                else
-                {
-                    lwsl_err("参数错误！");
-                    error_response(client, "参数错误！");
+                    const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
+                    operation_response(client, cur_song_info_json);
                     return 0;
                 }
             }
+            else
+            {
+                lwsl_err("参数错误！");
+                error_response(client, "参数错误！");
+                return 0;
+            }
+        }
+        error_response(client, "fail!");
+        break;
+    case PAUSE_SONG:
+        if (pause_song(client) >= 0)
+        {
+            const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
+            operation_response(client, cur_song_info_json);
+        }
+        else
+        {
             error_response(client, "fail!");
-            break;
-        case PAUSE_SONG:
-            if(pause_song(client->room)>=0)
+        }
+        break;
+    case RESUME_SONG:
+        if (resume_song(client) >= 0)
+        {
+            const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
+            operation_response(client, cur_song_info_json);
+        }
+        else
+        {
+            error_response(client, "fail!");
+        }
+        break;
+    case ADD_SONG_TO_PLAYLIST:
+        if (cJSON_IsObject(params))
+        {
+            char *songname = cJSON_GetObjectItem(params, "songname") ? cJSON_GetObjectItem(params, "songname")->valuestring : "";
+            char *songhash = cJSON_GetObjectItem(params, "songhash") ? cJSON_GetObjectItem(params, "songhash")->valuestring : "";
+            char *singername = cJSON_GetObjectItem(params, "singername") ? cJSON_GetObjectItem(params, "singername")->valuestring : "";
+            char *albumname = cJSON_GetObjectItem(params, "albumname") ? cJSON_GetObjectItem(params, "albumname")->valuestring : "";
+            char *duration = cJSON_GetObjectItem(params, "duration") ? cJSON_GetObjectItem(params, "duration")->valuestring : "";
+            char *coverurl = cJSON_GetObjectItem(params, "coverurl") ? cJSON_GetObjectItem(params, "coverurl")->valuestring : "";
+            if (insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl) >= 0)
             {
-                const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
-                operation_response(client, cur_song_info_json);
+                const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                operation_response(client, cur_playlist_json);
             }
             else
             {
                 error_response(client, "fail!");
             }
-            break;
-        case RESUME_SONG:
-            if(resume_song(client->room)>=0)
+        }
+        else
+        {
+            error_response(client, "参数错误！");
+        }
+        break;
+    case REMOVE_SONG_FROM_PLAYLIST:
+        if (cJSON_IsObject(params))
+        {
+            if (remove_song_from_playlist(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
             {
-                const char *cur_song_info_json = get_cur_song_info(client->room,BROADCAST_SONG_INFO);
-                operation_response(client, cur_song_info_json);
+                const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                operation_response(client, cur_playlist_json);
             }
             else
             {
                 error_response(client, "fail!");
             }
-            break;
-        case ADD_SONG_TO_PLAYLIST:
-            if(cJSON_IsObject(params))
+        }
+        else
+        {
+            error_response(client, "参数错误！");
+        }
+        break;
+    case UP_SONGBYHASH:
+        if (cJSON_IsObject(params))
+        {
+            if (upsongbyhash(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
             {
-                char *songname = cJSON_GetObjectItem(params, "songname")?cJSON_GetObjectItem(params, "songname")->valuestring:"";
-                char *songhash = cJSON_GetObjectItem(params, "songhash")?cJSON_GetObjectItem(params, "songhash")->valuestring:"";
-                char *singername = cJSON_GetObjectItem(params, "singername")?cJSON_GetObjectItem(params, "singername")->valuestring:"";
-                char *albumname = cJSON_GetObjectItem(params, "albumname")?cJSON_GetObjectItem(params, "albumname")->valuestring:"";
-                char *duration = cJSON_GetObjectItem(params, "duration")?cJSON_GetObjectItem(params, "duration")->valuestring:"";
-                char *coverurl = cJSON_GetObjectItem(params, "coverurl")?cJSON_GetObjectItem(params, "coverurl")->valuestring:"";
-                if (insert_song_to_playlist(client->room,
-                                            songname, songhash, singername, albumname, duration, coverurl)>=0)
-                {
-                    const char *cur_playlist_json = get_playlist_json(client->room,BROADCAST_SONG_LIST);
-                    operation_response(client, cur_playlist_json);
-                }
-                else
-                {
-                    error_response(client, "fail!");
-
-                }
+                const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                operation_response(client, cur_playlist_json);
             }
             else
             {
-                error_response(client, "参数错误！");
-            }
-            break;
-        case REMOVE_SONG_FROM_PLAYLIST:
-            if(cJSON_IsObject(params))
-            {
-                if(remove_song_from_playlist(client->room,
-                                             cJSON_GetObjectItem(params, "songhash")->valuestring)>=0)
-                {
-                    const char *cur_playlist_json = get_playlist_json(client->room,BROADCAST_SONG_LIST);
-                    operation_response(client, cur_playlist_json);
-                }
-                else
-                {
-                    error_response(client, "fail!");
-                }
-            }
-            else
-            {
-                error_response(client, "参数错误！");
-            }
-            break;
-        case UP_SONGBYHASH:
-            if(cJSON_IsObject(params))
-            {
-                if(upsongbyhash(client->room,
-                                 cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
-                {
-                    const char *cur_playlist_json = get_playlist_json(client->room,BROADCAST_SONG_LIST);
-                    operation_response(client, cur_playlist_json);
-                }
-                else
-                {
-                    error_response(client, "fail!");
-                }
-            }
-            else
-            {
-                error_response(client, "参数错误！");
-            }
-            break;
-        case GET_PLAYLIST:
-            const char *playlist_json = get_playlist_json(client->room,GET_PLAYLIST);
-            if (playlist_json)
-            {
-                pthread_mutex_lock(&client->lock);
-                strncpy(client->latest_msg, playlist_json, sizeof(client->latest_msg));
-                client->is_data_to_send = 1;
-                pthread_mutex_unlock(&client->lock);
-                lws_callback_on_writable(client->wsi);
-                lws_cancel_service(context);
-            }
-            else{
                 error_response(client, "fail!");
             }
-            break;
-        default:
-            lwsl_err("未识别的操作！");
-            error_response(client, "未识别的操作！");
-            break;
+        }
+        else
+        {
+            error_response(client, "参数错误！");
+        }
+        break;
+    case GET_PLAYLIST:
+        const char *playlist_json = get_playlist_json(client->room, GET_PLAYLIST);
+        playlist_json ? send_message_to_client(client, playlist_json) : error_response(client, "fail!");
+        break;
+    case GET_CLEIENT_LIST:
+        const char *client_list_json = get_client_list_json(client->room, GET_CLEIENT_LIST);
+        client_list_json ? send_message_to_client(client, client_list_json) : error_response(client, "fail!");
+    default:
+        lwsl_err("未识别的操作！");
+        error_response(client, "未识别的操作！");
+        break;
     }
     return 0;
 }
@@ -585,21 +586,21 @@ static int client_callback_wirtable(struct lws *wsi)
         return -1;
     }
     pthread_mutex_lock(&client->lock);
-    if(client->is_data_to_send)
+    if (client->is_data_to_send)
     {
         strcpy(local_msg, client->latest_msg);
         client->is_data_to_send = 0;
     }
     pthread_mutex_unlock(&client->lock);
 
-    if(strlen(local_msg))
+    if (strlen(local_msg))
     {
         unsigned char client_msg[LWS_PRE + sizeof(local_msg)];
         unsigned char *clnent_p = &client_msg[LWS_PRE];
         size_t client_n = strlen(local_msg);
         memcpy(clnent_p, local_msg, client_n);
         lws_write(wsi, clnent_p, client_n, LWS_WRITE_TEXT);
-        lwsl_notice("向%s发送消息: %s\n", client->ip,local_msg);
+        lwsl_notice("向%s发送消息: %s\n", client->ip, local_msg);
         return 0;
     }
 
@@ -613,19 +614,19 @@ static int client_callback_wirtable(struct lws *wsi)
 
     memcpy(p, local_msg, n);
     lws_write(wsi, p, n, LWS_WRITE_TEXT);
-    lwsl_notice("向%s发送广播消息: %s\n",client->ip, local_msg);
+    lwsl_notice("向%s发送广播消息: %s\n", client->ip, local_msg);
     return 0;
 }
 
 // WebSocket 回调函数，处理各种事件
-int callback_echo(struct lws *wsi, enum lws_callback_reasons reason,void *user, void *in, size_t len)
+int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len)
 {
     int ret = 0;
     switch (reason)
     {
     // 过滤新连接请求
     case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
-        ret = client_callback_filter(wsi);
+        // ret = client_callback_filter(wsi);
         break;
     // 新连接建立
     case LWS_CALLBACK_ESTABLISHED:
@@ -705,5 +706,3 @@ int main(int argc, const char **argv)
 
     return 0;
 }
-
-

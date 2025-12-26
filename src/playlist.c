@@ -3,6 +3,7 @@
 #include "cJSON.h"
 #include "playlist.h"
 #include "websocket_service.h"
+#include "rooms.h"
 
 #define SERVICE_IP_ADDRESS "47.112.6.94"
 #define SERVICE_PORT 3000
@@ -93,7 +94,7 @@ struct ResponseData *http_request(const char *url,
 
     if (res != CURLE_OK)
     {
-        lwsl_err("Failed to perform HTTP request: %s--:%s", url,curl_easy_strerror(res));
+        lwsl_err("Failed to perform HTTP request: %s--:%s", url, curl_easy_strerror(res));
         free(response->data);
         free(response);
         response = NULL;
@@ -103,11 +104,11 @@ struct ResponseData *http_request(const char *url,
     return response;
 }
 
-//获取歌词 url
+// 获取歌词 url
 char *get_lyrics_url(const char *song_hash)
 {
     struct ResponseData *response;
-    char url[256] = {0};  
+    char url[256] = {0};
     char *lyrics_url = (char *)malloc(256);
     memset(lyrics_url, 0, 256);
     if (!song_hash)
@@ -116,15 +117,15 @@ char *get_lyrics_url(const char *song_hash)
         return NULL;
     }
 
-    //拼接url
+    // 拼接url
     snprintf(url, sizeof(url), "http://%s:%d/search/lyric?hash=%s", SERVICE_IP_ADDRESS, SERVICE_PORT, song_hash);
     response = http_request(url, "GET", NULL, NULL);
-    if(!response)
+    if (!response)
     {
         free(lyrics_url);
         return "";
     }
-    //开始解析接收到的 json 数据，拼接为最终的歌词 url
+    // 开始解析接收到的 json 数据，拼接为最终的歌词 url
     cJSON *root = cJSON_Parse(response->data);
     if (!root)
     {
@@ -143,7 +144,7 @@ char *get_lyrics_url(const char *song_hash)
         return "";
     }
     cJSON *candidates = cJSON_GetObjectItem(root, "candidates");
-    if(!cJSON_IsArray(candidates))
+    if (!cJSON_IsArray(candidates))
     {
         lwsl_err("JSON 解析错误");
         cJSON_Delete(root);
@@ -153,9 +154,9 @@ char *get_lyrics_url(const char *song_hash)
         return "";
     }
     cJSON *candidate = cJSON_GetArrayItem(candidates, 0);
-    cJSON *id        = cJSON_GetObjectItem(candidate, "id");
+    cJSON *id = cJSON_GetObjectItem(candidate, "id");
     cJSON *accesskey = cJSON_GetObjectItem(candidate, "accesskey");
-    //拼接歌词 url
+    // 拼接歌词 url
     snprintf(lyrics_url, 255, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=lrc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
     free(response->data);
     free(response);
@@ -163,7 +164,7 @@ char *get_lyrics_url(const char *song_hash)
     return lyrics_url;
 }
 
-//获取歌曲 url
+// 获取歌曲 url
 char *get_song_url(const char *song_hash)
 {
     struct ResponseData *response;
@@ -175,10 +176,10 @@ char *get_song_url(const char *song_hash)
         free(song_url);
         return NULL;
     }
-    //拼接url
+    // 拼接url
     snprintf(url, sizeof(url), "http://%s:%d/song/url?hash=%s", SERVICE_IP_ADDRESS, SERVICE_PORT, song_hash);
     response = http_request(url, "GET", NULL, NULL);
-    if(!response)
+    if (!response)
     {
         free(song_url);
         return "";
@@ -201,7 +202,7 @@ char *get_song_url(const char *song_hash)
         return "";
     }
     cJSON *urls = cJSON_GetObjectItem(root, "url");
-    if(!cJSON_IsArray(urls))
+    if (!cJSON_IsArray(urls))
     {
         lwsl_err("JSON 解析错误");
         cJSON_Delete(root);
@@ -218,10 +219,40 @@ char *get_song_url(const char *song_hash)
     return song_url;
 }
 
-int insert_song_to_playlist(rooms_t *room, const char *song_name, const char *song_hash,
-                            const char *singer_name, const char *album_name,
-                            const char *duration,const char *cover_url)
+// 获取该房间所有的客户端信息
+const char *get_client_list_json(rooms_t *room, enum ctrl cmd)
 {
+    cJSON *root = cJSON_CreateObject();
+    cJSON *client_list = cJSON_CreateArray();
+    client_info_t *client = room->client_info->next;
+    if (!room || !root)
+        return NULL;
+
+    pthread_mutex_lock(&room->lock);
+    while (client)
+    {
+        cJSON *client_info = cJSON_CreateObject();
+        cJSON_AddStringToObject(client_info, "ip", client->ip);
+        cJSON_AddStringToObject(client_info, "userId", client->userId);
+        cJSON_AddNumberToObject(client_info, "client_counter", room->client_counter);
+        cJSON_AddItemToArray(client_list, client_info);
+        client = client->next;
+    }
+    pthread_mutex_unlock(&room->lock);
+    cJSON_AddItemToObject(root, "client_list", client_list);
+    cJSON_AddNumberToObject(root, "action", cmd);
+    cJSON_AddStringToObject(root, "status", "success");
+    cJSON_AddNumberToObject(root, "error_code", SUCCESS);
+    const char *json = cJSON_Print(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+int insert_song_to_playlist(client_info_t *client, const char *song_name, const char *song_hash,
+                            const char *singer_name, const char *album_name,
+                            const char *duration, const char *cover_url)
+{
+    rooms_t *room = client->room;
     if (!room || !song_name || !song_hash)
     {
         return -1;
@@ -243,8 +274,8 @@ int insert_song_to_playlist(rooms_t *room, const char *song_name, const char *so
     new_song->next = NULL;
 
     char *lyrics_url = get_lyrics_url(song_hash);
-    //获取歌词 url 并且填充进去
-    strncpy(new_song->lyrics_url, lyrics_url ,sizeof(new_song->lyrics_url));
+    // 获取歌词 url 并且填充进去
+    strncpy(new_song->lyrics_url, lyrics_url, sizeof(new_song->lyrics_url));
     free(lyrics_url);
 
     // 插入到播放列表末尾
@@ -252,18 +283,24 @@ int insert_song_to_playlist(rooms_t *room, const char *song_name, const char *so
     tail->next = new_song;
     room->playlist_tail = new_song;
 
-    //如果是第一首歌曲，则更新当前歌曲信息
-    if (room->current_song == NULL) 
+    // 如果是第一首歌曲，则更新当前歌曲信息
+    if (room->current_song == NULL)
     {
         room->current_song = new_song;
         update_playing_info(room);
     }
-
+    char message[128] = {0};
+    snprintf(message, sizeof(message), "添加歌曲：%s", song_name);
+    init_room_action(room, client->userId, ADD_SONG_TO_PLAYLIST, message);
     return 0;
 }
 
-int remove_song_from_playlist(rooms_t *room, const char *song_hash)
+int remove_song_from_playlist(client_info_t *client, const char *song_hash)
 {
+    if (!client)
+        return -1;
+    rooms_t *room = client->room;
+
     if (!room || !song_hash)
     {
         return -1;
@@ -276,6 +313,9 @@ int remove_song_from_playlist(rooms_t *room, const char *song_hash)
     {
         if (strcmp(curr->song_hash, song_hash) == 0)
         {
+            char message[256] = {0};
+            snprintf(message, sizeof(message), "删除歌曲：%s", curr->song_name);
+            init_room_action(room, client->userId, REMOVE_SONG_FROM_PLAYLIST, message);
             prev->next = curr->next;
             if (curr == room->playlist_tail)
             {
@@ -290,7 +330,7 @@ int remove_song_from_playlist(rooms_t *room, const char *song_hash)
 
     return -1; // 未找到歌曲
 }
-//切换正在播放的歌曲信息
+// 切换正在播放的歌曲信息
 int update_playing_info(rooms_t *room)
 {
     if (!room || !room->current_song)
@@ -323,8 +363,29 @@ int update_playing_info(rooms_t *room)
 
     return 0;
 }
-int play_next_song(rooms_t *room)
+
+// 系统播放下一首
+int play_next_song_bysystem(rooms_t *room)
 {
+    if (!room || room->current_song)
+        return -1;
+    pthread_mutex_lock(&room->lock);
+    room->current_song = room->current_song->next;
+    if (!room->current_song)
+    {
+        // 播放列表结束，重置为头节点
+        room->current_song = room->playlist_head->next;
+    }
+    pthread_mutex_unlock(&room->lock);
+    update_playing_info(room);
+}
+
+int play_next_song(client_info_t *client)
+{
+    if (!client)
+        return -1;
+    rooms_t *room = client->room;
+
     if (!room || !room->current_song)
     {
         return -1;
@@ -336,12 +397,20 @@ int play_next_song(rooms_t *room)
         // 播放列表结束，重置为头节点
         room->current_song = room->playlist_head->next;
     }
+    char message[1024] = {0};
+    snprintf(message, sizeof(message), "播放了下一首:%s", room->current_song->song_name);
+    init_room_action(room, client->userId, PLAY_BY_SONG_HASH, message);
     pthread_mutex_unlock(&room->lock);
     update_playing_info(room);
+
     return 0;
 }
-int playbysonghash(rooms_t *room, const char *song_hash)
+int playbysonghash(client_info_t *client, const char *song_hash)
 {
+    if (!client)
+        return -1;
+    rooms_t *room = client->room;
+
     if (!room || !song_hash)
     {
         return -1;
@@ -354,6 +423,10 @@ int playbysonghash(rooms_t *room, const char *song_hash)
         if (strcmp(curr->song_hash, song_hash) == 0)
         {
             room->current_song = curr;
+            char message[1024] = {0};
+            snprintf(message, sizeof(message), "播放了%s", room->current_song->song_name);
+            init_room_action(room, client->userId, PLAY_BY_SONG_HASH, message);
+            pthread_mutex_unlock(&room->lock);
             update_playing_info(room);
             return 0;
         }
@@ -363,9 +436,12 @@ int playbysonghash(rooms_t *room, const char *song_hash)
 
     return -1; // 未找到歌曲
 }
-//将歌曲置顶
-int upsongbyhash(rooms_t *room, const char *song_hash)
+// 将歌曲置顶
+int upsongbyhash(client_info_t *client, const char *song_hash)
 {
+    if (!client)
+        return -1;
+    rooms_t *room = client->room;
     if (!room || !song_hash)
     {
         return -1;
@@ -380,6 +456,9 @@ int upsongbyhash(rooms_t *room, const char *song_hash)
     {
         if (strcmp(curr->song_hash, song_hash) == 0)
         {
+            char message[256] = {0};
+            snprintf(message, sizeof(message), "将歌曲置顶：%s", curr->song_name);
+            init_room_action(room, client->userId, UP_SONGBYHASH, message);
             // 找到歌曲，进行置顶操作
             prev->next = curr->next;
             if (curr == room->playlist_tail)
@@ -389,6 +468,7 @@ int upsongbyhash(rooms_t *room, const char *song_hash)
             // 插入到头节点后面
             curr->next = room->playlist_head->next;
             room->playlist_head->next = curr;
+            pthread_mutex_unlock(&room->lock);
             return 0;
         }
         prev = curr;
@@ -399,7 +479,37 @@ int upsongbyhash(rooms_t *room, const char *song_hash)
     return -1; // 未找到歌曲
 }
 
-const char* get_cur_song_info(rooms_t *room,enum ctrl cmd)
+// 获取当前播放进度，用于JSON广播
+const char *get_cur_played_percent(rooms_t *room)
+{
+    playing_info_t playing = room->playing_info;
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        return NULL;
+    }
+    cJSON *data = cJSON_CreateObject();
+    if (!data)
+    {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&playing.lock);
+
+    cJSON_AddNumberToObject(data, "played_percent", playing.played_percent);
+    cJSON_AddNumberToObject(root, "error_code", SUCCESS);
+    cJSON_AddStringToObject(root, "status", "success");
+    cJSON_AddNumberToObject(root, "action", BROADCAST_SONG_INFO);
+    cJSON_AddItemToObject(root, "data", data);
+
+    pthread_mutex_unlock(&playing.lock);
+
+    const char *json_str = cJSON_Print(root);
+    cJSON_Delete(root);
+    return json_str;
+}
+
+const char *get_cur_song_info(rooms_t *room, enum ctrl cmd)
 {
     playing_info_t playing = room->playing_info;
 
@@ -435,8 +545,11 @@ const char* get_cur_song_info(rooms_t *room,enum ctrl cmd)
     cJSON_Delete(root);
     return json_str;
 }
-int pause_song(rooms_t *room)
+int pause_song(client_info_t *client)
 {
+    if (!client)
+        return -1;
+    rooms_t *room = client->room;
     if (!room)
     {
         return -1;
@@ -445,11 +558,14 @@ int pause_song(rooms_t *room)
     room->playing_info.is_playing = 0;
     room->playing_info.last_update_time = time(NULL);
     pthread_mutex_unlock(&room->playing_info.lock);
+    init_room_action(room, client->userId, PAUSE_SONG, "暂停播放");
     return 0;
-
 }
-int resume_song(rooms_t *room)
+int resume_song(client_info_t *client)
 {
+    if (!client)
+        return -1;
+    rooms_t *room = client->room;
     if (!room)
     {
         return -1;
@@ -458,12 +574,13 @@ int resume_song(rooms_t *room)
     room->playing_info.is_playing = 1;
     room->playing_info.last_update_time = time(NULL);
     pthread_mutex_unlock(&room->playing_info.lock);
+    init_room_action(room, client->userId, RESUME_SONG, "继续播放");
     lws_sul_schedule(context, 0, &(room->playing_info).timer, timer_callback, 1 * LWS_US_PER_SEC);
     return 0;
 }
-//获取当前房间播放列表
-const char *get_playlist_json(rooms_t *room,enum ctrl cmd)
-{ 
+// 获取当前房间播放列表
+const char *get_playlist_json(rooms_t *room, enum ctrl cmd)
+{
     playlist_t *curr = room->playlist_head->next;
     cJSON *root = cJSON_CreateObject();
     if (!root)
