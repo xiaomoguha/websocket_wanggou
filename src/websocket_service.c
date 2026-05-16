@@ -14,6 +14,7 @@
 int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len);
 static void success_response(client_info_t *client, const char *msg);
 static void error_response(client_info_t *client, const char *msg);
+static void send_message_to_client(client_info_t *client, const char *msg);
 
 struct lws_context *context = NULL;
 static int interrupted = 0;
