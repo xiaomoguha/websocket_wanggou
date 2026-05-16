@@ -11,8 +11,8 @@ typedef struct playlist
     char singer_name[128];
     char album_name[128];
     char duration[16];
-    char lyrics_url[256];
-    char cover_url[256];
+    char lyrics_url[512];
+    char cover_url[512];
     struct playlist *next;
 } playlist_t;
 // 正在播放的歌曲信息
@@ -21,12 +21,12 @@ typedef struct playing_info
     lws_sorted_usec_list_t timer;
     char song_name[128];
     char song_hash[128];
-    char song_url[256];
+    char song_url[1024];
     char singer_name[128];
     char album_name[128];
     char duration[16];
-    char lyrics_url[256];
-    char cover_url[256];
+    char lyrics_url[512];
+    char cover_url[512];
     double played_percent;
     char is_playing;
     time_t start_time;
@@ -41,7 +41,7 @@ typedef struct client_info
     char ip[INET_ADDRSTRLEN];
     struct rooms *room; // 对应房间节点
     char userId[64];
-    char latest_msg[1024]; // 服务器单独回复信息
+    char latest_msg[4096]; // 服务器单独回复信息
     char is_data_to_send;  // 是否有数据需要发送
     struct client_info *next;
     struct client_info *prev;
@@ -63,7 +63,7 @@ typedef struct rooms
     char creater_id[64];
     unsigned int client_counter;
     client_info_t *client_info;
-    char latest_msg[1024];
+    char latest_msg[4096];
     pthread_mutex_t lock;
     playlist_t *playlist_head;
     playlist_t *playlist_tail;

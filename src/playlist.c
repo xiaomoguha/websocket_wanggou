@@ -108,8 +108,8 @@ struct ResponseData *http_request(const char *url,
 char *get_lyrics_url(const char *song_hash)
 {
     struct ResponseData *response;
-    char url[256] = {0};
-    char *lyrics_url = (char *)malloc(256);
+    char url[512] = {0};
+    char *lyrics_url = (char *)malloc(512);
     memset(lyrics_url, 0, 256);
     if (!song_hash)
     {
@@ -157,7 +157,7 @@ char *get_lyrics_url(const char *song_hash)
     cJSON *id = cJSON_GetObjectItem(candidate, "id");
     cJSON *accesskey = cJSON_GetObjectItem(candidate, "accesskey");
     // 拼接歌词 url
-    snprintf(lyrics_url, 255, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=lrc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
+    snprintf(lyrics_url, 511, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=lrc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
     free(response->data);
     free(response);
     cJSON_Delete(root);
@@ -168,8 +168,8 @@ char *get_lyrics_url(const char *song_hash)
 char *get_song_url(const char *song_hash)
 {
     struct ResponseData *response;
-    char url[256] = {0};
-    char *song_url = (char *)malloc(256);
+    char url[512] = {0};
+    char *song_url = (char *)malloc(1024);
     memset(song_url, 0, 256);
     if (!song_hash)
     {
@@ -212,7 +212,7 @@ char *get_song_url(const char *song_hash)
         return "";
     }
     cJSON *url_obj = cJSON_GetArrayItem(urls, 0);
-    strncpy(song_url, url_obj->valuestring, 255);
+    strncpy(song_url, url_obj->valuestring, 1023);
     free(response->data);
     free(response);
     cJSON_Delete(root);
@@ -352,7 +352,7 @@ int update_playing_info(rooms_t *room)
     strncpy(playing_info->cover_url, curr->cover_url, sizeof(playing_info->cover_url) - 1);
     // 获取歌曲 url 填充进去
     char *song_url = get_song_url(curr->song_hash);
-    strncpy(playing_info->song_url, song_url, sizeof(playing_info->song_url));
+    strncpy(playing_info->song_url, song_url, sizeof(playing_info->song_url) - 1);
     free(song_url);
     playing_info->played_percent = 0; // 重置播放进度
     playing_info->is_playing = 1;     // 设置为正在播放
@@ -367,7 +367,7 @@ int update_playing_info(rooms_t *room)
 // 系统播放下一首
 int play_next_song_bysystem(rooms_t *room)
 {
-    if (!room || room->current_song)
+    if (!room || !room->current_song)
         return -1;
     pthread_mutex_lock(&room->lock);
     room->current_song = room->current_song->next;

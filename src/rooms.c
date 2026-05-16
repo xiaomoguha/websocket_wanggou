@@ -139,7 +139,6 @@ void remove_room_node(rooms_t *head, rooms_t *node)
         free(cur);
         cur = next;
     }
-    free(node->playlist_head);
     node->playlist_head = NULL;
     // 释放房间操作链表
     free_room_action(node);

@@ -4,6 +4,9 @@
 #include <string.h>
 #include <signal.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "types.h"
 #include <stdbool.h>
 #include "playlist.h"
@@ -23,7 +26,7 @@ static struct lws_protocols protocols[] = {
         "ctrl-protocol", // 协议名称
         callback_echo,   // 回调函数
         0,               // 每个连接的用户数据大小
-        1024,            // 接收缓冲区大小
+        4096,            // 接收缓冲区大小
     },
     {NULL, NULL, 0, 0} // 协议列表结束标记
 };
@@ -149,6 +152,32 @@ static void sigint_handler(int sig)
     interrupted = 1;
 }
 
+static void sigterm_handler(int sig)
+{
+    interrupted = 1;
+}
+
+// 日志文件指针
+static FILE *log_file = NULL;
+
+// 自定义日志输出函数（同时输出到 stderr 和日志文件）
+static void log_emit_function(int level, const char *line)
+{
+    // 输出到 stderr
+    fprintf(stderr, "%s", line);
+
+    // 输出到日志文件
+    if (log_file)
+    {
+        time_t now = time(NULL);
+        struct tm *t = localtime(&now);
+        char timebuf[32];
+        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", t);
+        fprintf(log_file, "[%s] %s", timebuf, line);
+        fflush(log_file);
+    }
+}
+
 static int client_callback_filter(struct lws *wsi)
 {
     lwsl_notice("新的客户端申请连接\n");
@@ -198,6 +227,7 @@ void timer_callback(lws_sorted_usec_list_t *sul)
     {
         const char *cur_song_info_json = get_cur_played_percent(playing_info->room);
         broadcast_response_room(playing_info->room, cur_song_info_json);
+        free((void *)cur_song_info_json);
     }
 
     lws_sul_schedule(context, 0, sul, timer_callback, callback_time * LWS_US_PER_MS);
@@ -251,7 +281,23 @@ static int client_callback_established(struct lws *wsi)
                 print_room_info(room);
             }
             // 广播新的客户端信息
-            broadcast_response_room(room, get_client_list_json(room, BROADCAST_CLIENT_LIST));
+            {
+                const char *client_list = get_client_list_json(room, BROADCAST_CLIENT_LIST);
+                broadcast_response_room(room, client_list);
+                free((void *)client_list);
+            }
+            // 向新客户端同步房间当前状态
+            {
+                const char *playlist_json = get_playlist_json(room, GET_PLAYLIST);
+                send_message_to_client(new_client, playlist_json);
+                free((void *)playlist_json);
+            }
+            if (room->current_song)
+            {
+                const char *song_info = get_cur_song_info(room, BROADCAST_SONG_INFO);
+                send_message_to_client(new_client, song_info);
+                free((void *)song_info);
+            }
             return 0;
         }
     }
@@ -352,32 +398,29 @@ static void error_response(client_info_t *client, const char *msg)
     strncpy(client->latest_msg, json_str, sizeof(client->latest_msg) - 1);
     client->is_data_to_send = 1;
     pthread_mutex_unlock(&client->lock);
+    free(json_str);
     lws_callback_on_writable(client->wsi);
     lws_cancel_service(context);
 }
 
 static void success_response(client_info_t *client, const char *msg)
 {
-    // 1. 创建根对象 {}
     cJSON *root = cJSON_CreateObject();
     if (!root)
         return;
 
-    // 2. 添加字段
     cJSON_AddNumberToObject(root, "error_code", SUCCESS);
     cJSON_AddStringToObject(root, "status", "success");
     cJSON_AddStringToObject(root, "message", msg);
 
-    // 3. 转为字符串（注意：返回的字符串需要 free()）
     char *json_str = cJSON_PrintUnformatted(root);
-
-    // 4. 释放 cJSON 对象（但保留字符串）
     cJSON_Delete(root);
 
     pthread_mutex_lock(&client->lock);
     strncpy(client->latest_msg, json_str, sizeof(client->latest_msg) - 1);
     client->is_data_to_send = 1;
     pthread_mutex_unlock(&client->lock);
+    free(json_str);
     lws_callback_on_writable(client->wsi);
     lws_cancel_service(context);
 }
@@ -402,14 +445,27 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         lwsl_err("Client info is NULL\n");
         return -1;
     }
-    ((char *)in)[len] = '\0'; // 确保消息以null结尾
-    lwsl_notice("收到%s消息: %s (长度: %zu)\n", client->ip, (char *)in, len);
+    // 复制到本地缓冲区，避免修改 libwebsockets 的只读输入缓冲区
+    if (len >= sizeof(client->latest_msg))
+    {
+        lwsl_err("消息过长，丢弃 (长度: %zu)\n", len);
+        return 0;
+    }
+    char *msg_buf = (char *)malloc(len + 1);
+    if (!msg_buf)
+    {
+        lwsl_err("内存分配失败\n");
+        return 0;
+    }
+    memcpy(msg_buf, in, len);
+    msg_buf[len] = '\0';
+    lwsl_notice("收到%s消息: %s (长度: %zu)\n", client->ip, msg_buf, len);
 
-    cJSON *root = cJSON_Parse((char *)in);
+    cJSON *root = cJSON_Parse(msg_buf);
+    free(msg_buf);
     if (!root)
     {
         const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL)
         {
             char msg[128] = {0};
             sprintf(msg, "JSON 解析错误:%s", error_ptr);
@@ -443,14 +499,18 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     switch (action->valueint)
     {
     case GET_CUR_SONG_INFO:
-        const char *cur_song_info_json = get_cur_song_info(client->room, GET_CUR_SONG_INFO);
-        cur_song_info_json ? send_message_to_client(client, cur_song_info_json) : error_response(client, "fail!");
+        {
+            const char *cur_song_info_json = get_cur_song_info(client->room, GET_CUR_SONG_INFO);
+            cur_song_info_json ? send_message_to_client(client, cur_song_info_json) : error_response(client, "fail!");
+            free((void *)cur_song_info_json);
+        }
         break;
     case PLAY_NEXT_SONG:
         if (play_next_song(client) >= 0)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
             operation_response(client, cur_song_info_json);
+            free((void *)cur_song_info_json);
         }
         else
         {
@@ -467,6 +527,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 {
                     const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
                     operation_response(client, cur_song_info_json);
+                    free((void *)cur_song_info_json);
                     return 0;
                 }
             }
@@ -484,6 +545,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
             operation_response(client, cur_song_info_json);
+            free((void *)cur_song_info_json);
         }
         else
         {
@@ -495,6 +557,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
             operation_response(client, cur_song_info_json);
+            free((void *)cur_song_info_json);
         }
         else
         {
@@ -514,6 +577,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 operation_response(client, cur_playlist_json);
+                free((void *)cur_playlist_json);
             }
             else
             {
@@ -532,6 +596,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 operation_response(client, cur_playlist_json);
+                free((void *)cur_playlist_json);
             }
             else
             {
@@ -550,6 +615,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 operation_response(client, cur_playlist_json);
+                free((void *)cur_playlist_json);
             }
             else
             {
@@ -562,12 +628,17 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         }
         break;
     case GET_PLAYLIST:
-        const char *playlist_json = get_playlist_json(client->room, GET_PLAYLIST);
-        playlist_json ? send_message_to_client(client, playlist_json) : error_response(client, "fail!");
+        {
+            const char *playlist_json = get_playlist_json(client->room, GET_PLAYLIST);
+            playlist_json ? send_message_to_client(client, playlist_json) : error_response(client, "fail!");
+            free((void *)playlist_json);
+        }
         break;
     case GET_CLEIENT_LIST:
         const char *client_list_json = get_client_list_json(client->room, GET_CLEIENT_LIST);
         client_list_json ? send_message_to_client(client, client_list_json) : error_response(client, "fail!");
+        free((void *)client_list_json);
+        break;
     default:
         lwsl_err("未识别的操作！");
         error_response(client, "未识别的操作！");
@@ -578,7 +649,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
 
 static int client_callback_wirtable(struct lws *wsi)
 {
-    char local_msg[1024] = {0};
+    char local_msg[4096] = {0};
     client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
     if (!client)
     {
@@ -652,6 +723,16 @@ int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
     return ret;
 }
 
+// 打印使用帮助
+static void print_usage(const char *prog)
+{
+    fprintf(stderr, "用法: %s [选项]\n", prog);
+    fprintf(stderr, "  -p <端口>    监听端口 (默认: 3375)\n");
+    fprintf(stderr, "  -l <文件>    日志输出文件 (默认: 仅 stderr)\n");
+    fprintf(stderr, "  -d           以守护进程模式运行\n");
+    fprintf(stderr, "  -h           显示帮助\n");
+}
+
 // 服务器主函数
 int main(int argc, const char **argv)
 {
@@ -659,10 +740,61 @@ int main(int argc, const char **argv)
     const char *iface = NULL;
     int port = 3375;
     int opts = 0;
+    int daemon_mode = 0;
+    const char *log_path = NULL;
+    int opt;
 
-    // 初始化日志系统
-    lws_set_log_level(LLL_NOTICE | LLL_ERR, NULL);
-    // 初始化 http—get
+    // 解析命令行参数
+    while ((opt = getopt(argc, (char *const *)argv, "p:l:dh")) != -1)
+    {
+        switch (opt)
+        {
+        case 'p':
+            port = atoi(optarg);
+            if (port <= 0 || port > 65535)
+            {
+                fprintf(stderr, "无效端口号: %s\n", optarg);
+                return 1;
+            }
+            break;
+        case 'l':
+            log_path = optarg;
+            break;
+        case 'd':
+            daemon_mode = 1;
+            break;
+        case 'h':
+        default:
+            print_usage(argv[0]);
+            return (opt == 'h') ? 0 : 1;
+        }
+    }
+
+    // 打开日志文件
+    if (log_path)
+    {
+        log_file = fopen(log_path, "a");
+        if (!log_file)
+        {
+            fprintf(stderr, "无法打开日志文件: %s\n", log_path);
+            return 1;
+        }
+    }
+
+    // 设置日志输出
+    lws_set_log_level(LLL_NOTICE | LLL_ERR, log_emit_function);
+
+    // 守护进程模式
+    if (daemon_mode)
+    {
+        if (daemon(1, 0) < 0)
+        {
+            lwsl_err("daemon() 失败\n");
+            return 1;
+        }
+        lwsl_notice("已切换为守护进程模式\n");
+    }
+
     curl_global_init(CURL_GLOBAL_ALL);
 
     g_rooms_list = init_rooms();
@@ -674,6 +806,7 @@ int main(int argc, const char **argv)
 
     // 设置信号处理
     signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigterm_handler);
 
     // 初始化上下文创建信息
     memset(&info, 0, sizeof info);
@@ -691,18 +824,23 @@ int main(int argc, const char **argv)
     }
 
     lwsl_notice("WebSocket 服务器已启动，监听端口 %d\n", port);
-    lwsl_notice("按 Ctrl+C 退出...\n");
+    lwsl_notice("按 Ctrl+C 或发送 SIGTERM 退出...\n");
 
     // 事件循环
     while (!interrupted)
     {
-        // 处理网络事件，超时设置为 10 毫秒
         lws_service(context, 10);
     }
 
     // 清理资源
     lwsl_notice("服务器正在关闭...\n");
     lws_context_destroy(context);
+    curl_global_cleanup();
+
+    if (log_file)
+    {
+        fclose(log_file);
+    }
 
     return 0;
 }
