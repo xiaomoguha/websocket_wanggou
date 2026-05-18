@@ -229,7 +229,7 @@ void timer_callback(lws_sorted_usec_list_t *sul)
     // 广播播放信息(有歌曲的时候)
     if (playing_info->room->current_song)
     {
-        const char *cur_song_info_json = get_cur_played_percent(playing_info->room);
+        const char *cur_song_info_json = get_cur_song_info(playing_info->room, BROADCAST_SONG_INFO);
         broadcast_response_room(playing_info->room, cur_song_info_json);
         free((void *)cur_song_info_json);
     }
@@ -610,18 +610,10 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             char *coverurl = cJSON_GetObjectItem(params, "coverurl") ? cJSON_GetObjectItem(params, "coverurl")->valuestring : "";
             if (insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl) >= 0)
             {
-                const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
-                operation_response(client, cur_playlist_json);
-                free((void *)cur_playlist_json);
-                // 如果房间有正在播放的歌曲，向操作者发送歌曲信息让其立即播放
-                // （第一首歌添加后需要立即通知，避免等定时器延迟）
-                if (client->room->current_song)
-                {
-                    const char *song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-                    // 通过 room->latest_msg 依次广播，后续定时器回调会自动同步给其他客户端
-                    broadcast_response_room(client->room, song_info_json);
-                    free((void *)song_info_json);
-                }
+                // 一次广播：合并playlist + song_info，避免room->latest_msg被覆盖
+                const char *combined_json = get_playlist_and_song_info_json(client->room);
+                broadcast_response_room(client->room, combined_json);
+                free((void *)combined_json);
             }
             else
             {
@@ -639,7 +631,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             if (remove_song_from_playlist(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
-                operation_response(client, cur_playlist_json);
+                broadcast_response_room(client->room, cur_playlist_json);
                 free((void *)cur_playlist_json);
             }
             else
@@ -658,7 +650,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             if (upsongbyhash(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
-                operation_response(client, cur_playlist_json);
+                broadcast_response_room(client->room, cur_playlist_json);
                 free((void *)cur_playlist_json);
             }
             else
