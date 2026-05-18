@@ -609,6 +609,38 @@ int resume_song(client_info_t *client)
     return 0;
 }
 // 获取当前房间播放列表
+const char *get_playlist_json(rooms_t *room, enum ctrl cmd)
+{
+    playlist_t *curr = room->playlist_head->next;
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+        return NULL;
+    // 创建一个json数组对象
+    cJSON *playlist = cJSON_CreateArray();
+    pthread_mutex_lock(&room->lock);
+    while (curr)
+    {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "songname", curr->song_name);
+        cJSON_AddStringToObject(item, "songhash", curr->song_hash);
+        cJSON_AddStringToObject(item, "singername", curr->singer_name);
+        cJSON_AddStringToObject(item, "album_name", curr->album_name);
+        cJSON_AddStringToObject(item, "duration", curr->duration);
+        cJSON_AddStringToObject(item, "cover_url", curr->cover_url);
+        cJSON_AddItemToArray(playlist, item);
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&room->lock);
+    // 添加到json对象中
+    cJSON_AddItemToObject(root, "playlist", playlist);
+    cJSON_AddNumberToObject(root, "error_code", SUCCESS);
+    cJSON_AddStringToObject(root, "status", "success");
+    cJSON_AddNumberToObject(root, "action", cmd);
+    const char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str;
+}
+
 // 获取播放列表和当前歌曲信息的合并JSON（用于添加歌曲后的广播）
 const char *get_playlist_and_song_info_json(rooms_t *room)
 {
