@@ -613,6 +613,15 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 operation_response(client, cur_playlist_json);
                 free((void *)cur_playlist_json);
+                // 如果房间有正在播放的歌曲，向操作者发送歌曲信息让其立即播放
+                // （第一首歌添加后需要立即通知，避免等定时器延迟）
+                if (client->room->current_song)
+                {
+                    const char *song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
+                    // 通过 room->latest_msg 依次广播，后续定时器回调会自动同步给其他客户端
+                    broadcast_response_room(client->room, song_info_json);
+                    free((void *)song_info_json);
+                }
             }
             else
             {
@@ -669,8 +678,8 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             free((void *)playlist_json);
         }
         break;
-    case GET_CLEIENT_LIST:
-        const char *client_list_json = get_client_list_json(client->room, GET_CLEIENT_LIST);
+    case GET_CLIENT_LIST:
+        const char *client_list_json = get_client_list_json(client->room, GET_CLIENT_LIST);
         client_list_json ? send_message_to_client(client, client_list_json) : error_response(client, "fail!");
         free((void *)client_list_json);
         break;
