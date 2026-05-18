@@ -104,17 +104,18 @@ struct ResponseData *http_request(const char *url,
     return response;
 }
 
-// 获取歌词 url
+// 获取歌词 url（始终返回可 free 的堆内存，调用者必须 free）
 char *get_lyrics_url(const char *song_hash)
 {
     struct ResponseData *response;
     char url[512] = {0};
     char *lyrics_url = (char *)malloc(512);
-    memset(lyrics_url, 0, 256);
+    if (!lyrics_url)
+        return NULL;
+    memset(lyrics_url, 0, 512);
     if (!song_hash)
     {
-        free(lyrics_url);
-        return NULL;
+        return lyrics_url; // 空字符串
     }
 
     // 拼接url
@@ -122,8 +123,7 @@ char *get_lyrics_url(const char *song_hash)
     response = http_request(url, "GET", NULL, NULL);
     if (!response)
     {
-        free(lyrics_url);
-        return "";
+        return lyrics_url; // 空字符串
     }
     // 开始解析接收到的 json 数据，拼接为最终的歌词 url
     cJSON *root = cJSON_Parse(response->data);
@@ -132,30 +132,32 @@ char *get_lyrics_url(const char *song_hash)
         const char *error_ptr = cJSON_GetErrorPtr();
         if (error_ptr != NULL)
         {
-            char msg[128] = {0};
-            sprintf(msg, "JSON 解析错误:%s", error_ptr);
             lwsl_err("JSON 解析错误: %s\n", error_ptr);
-            cJSON_Delete(root);
-            free(response->data);
-            free(response);
-            free(lyrics_url);
-            return "";
         }
-        return "";
+        free(response->data);
+        free(response);
+        return lyrics_url; // 空字符串
     }
     cJSON *candidates = cJSON_GetObjectItem(root, "candidates");
     if (!cJSON_IsArray(candidates))
     {
-        lwsl_err("JSON 解析错误");
+        lwsl_err("JSON 解析错误: candidates 不是数组");
         cJSON_Delete(root);
         free(response->data);
         free(response);
-        free(lyrics_url);
-        return "";
+        return lyrics_url; // 空字符串
     }
     cJSON *candidate = cJSON_GetArrayItem(candidates, 0);
     cJSON *id = cJSON_GetObjectItem(candidate, "id");
     cJSON *accesskey = cJSON_GetObjectItem(candidate, "accesskey");
+    if (!id || !accesskey)
+    {
+        lwsl_err("JSON 解析错误: 缺少 id 或 accesskey");
+        cJSON_Delete(root);
+        free(response->data);
+        free(response);
+        return lyrics_url; // 空字符串
+    }
     // 拼接歌词 url
     snprintf(lyrics_url, 511, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=lrc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
     free(response->data);
@@ -164,25 +166,25 @@ char *get_lyrics_url(const char *song_hash)
     return lyrics_url;
 }
 
-// 获取歌曲 url
+// 获取歌曲 url（始终返回可 free 的堆内存，调用者必须 free）
 char *get_song_url(const char *song_hash)
 {
     struct ResponseData *response;
     char url[512] = {0};
     char *song_url = (char *)malloc(1024);
-    memset(song_url, 0, 256);
+    if (!song_url)
+        return NULL;
+    memset(song_url, 0, 1024);
     if (!song_hash)
     {
-        free(song_url);
-        return NULL;
+        return song_url; // 空字符串
     }
     // 拼接url
     snprintf(url, sizeof(url), "http://%s:%d/song/url?hash=%s", SERVICE_IP_ADDRESS, SERVICE_PORT, song_hash);
     response = http_request(url, "GET", NULL, NULL);
     if (!response)
     {
-        free(song_url);
-        return "";
+        return song_url; // 空字符串
     }
     cJSON *root = cJSON_Parse(response->data);
     if (!root)
@@ -190,29 +192,26 @@ char *get_song_url(const char *song_hash)
         const char *error_ptr = cJSON_GetErrorPtr();
         if (error_ptr != NULL)
         {
-            char msg[128] = {0};
-            sprintf(msg, "JSON 解析错误:%s", error_ptr);
             lwsl_err("JSON 解析错误: %s\n", error_ptr);
-            cJSON_Delete(root);
-            free(response->data);
-            free(response);
-            free(song_url);
-            return "";
         }
-        return "";
+        free(response->data);
+        free(response);
+        return song_url; // 空字符串
     }
     cJSON *urls = cJSON_GetObjectItem(root, "url");
     if (!cJSON_IsArray(urls))
     {
-        lwsl_err("JSON 解析错误");
+        lwsl_err("JSON 解析错误: url 不是数组");
         cJSON_Delete(root);
         free(response->data);
         free(response);
-        free(song_url);
-        return "";
+        return song_url; // 空字符串
     }
     cJSON *url_obj = cJSON_GetArrayItem(urls, 0);
-    strncpy(song_url, url_obj->valuestring, 1023);
+    if (url_obj && url_obj->valuestring)
+    {
+        strncpy(song_url, url_obj->valuestring, 1023);
+    }
     free(response->data);
     free(response);
     cJSON_Delete(root);

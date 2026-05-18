@@ -254,7 +254,34 @@ static int client_callback_established(struct lws *wsi)
         return -1;
     }
 
-    lws_get_peer_simple(wsi, client_ip, sizeof(client_ip));
+    // 优先从 X-Real-IP / X-Forwarded-For 头获取真实客户端 IP（nginx 反向代理场景）
+    {
+        char hdr_real_ip[64] = {0};
+        char hdr_fwd_for[256] = {0};
+        int n = lws_hdr_custom_length(wsi, "x-real-ip:", 10);
+        if (n > 0 && n < (int)sizeof(hdr_real_ip))
+        {
+            lws_hdr_custom_copy(wsi, hdr_real_ip, sizeof(hdr_real_ip), "x-real-ip:", 10);
+            strncpy(client_ip, hdr_real_ip, sizeof(client_ip) - 1);
+        }
+        else
+        {
+            n = lws_hdr_custom_length(wsi, "x-forwarded-for:", 17);
+            if (n > 0 && n < (int)sizeof(hdr_fwd_for))
+            {
+                lws_hdr_custom_copy(wsi, hdr_fwd_for, sizeof(hdr_fwd_for), "x-forwarded-for:", 17);
+                // X-Forwarded-For 可能有多个 IP，取第一个
+                char *comma = strchr(hdr_fwd_for, ',');
+                if (comma) *comma = '\0';
+                strncpy(client_ip, hdr_fwd_for, sizeof(client_ip) - 1);
+            }
+        }
+    }
+    // 如果没有代理头，则直接取 TCP 层 IP
+    if (!strlen(client_ip))
+    {
+        lws_get_peer_simple(wsi, client_ip, sizeof(client_ip));
+    }
     if (!strlen(client_ip))
     {
         lwsl_err("无法获取客户端IP，断开连接\n");
@@ -745,8 +772,8 @@ static void print_usage(const char *prog)
 int main(int argc, const char **argv)
 {
     struct lws_context_creation_info info;
-    const char *iface = NULL;
-    int port = 3375;
+    const char *iface = "127.0.0.1";
+    int port = 3001;
     int opts = 0;
     int daemon_mode = 0;
     const char *log_path = NULL;
