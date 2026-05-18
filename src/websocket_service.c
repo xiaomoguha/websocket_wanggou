@@ -267,7 +267,7 @@ static int client_callback_established(struct lws *wsi)
         else
         {
             // 尝试读取 X-Forwarded-For
-            n = lws_hdr_copy(wsi, hdr_buf, sizeof(hdr_buf), WSI_TOKEN_HTTP_X_FORWARDED_FOR);
+            n = lws_hdr_copy(wsi, hdr_buf, sizeof(hdr_buf), WSI_TOKEN_X_FORWARDED_FOR);
             if (n > 0)
             {
                 // X-Forwarded-For 可能有多个 IP，取第一个
