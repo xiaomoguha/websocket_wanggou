@@ -39,10 +39,12 @@ typedef struct client_info
 {
     struct lws *wsi;
     char ip[INET_ADDRSTRLEN];
-    struct rooms *room; // 对应房间节点
+    struct rooms *room;
     char userId[64];
-    char latest_msg[4096]; // 服务器单独回复信息
-    char is_data_to_send;  // 是否有数据需要发送
+    char nickname[128];
+    char avatar_url[512];
+    char latest_msg[4096];
+    char is_data_to_send;
     struct client_info *next;
     struct client_info *prev;
     pthread_mutex_t lock;

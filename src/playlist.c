@@ -234,6 +234,8 @@ const char *get_client_list_json(rooms_t *room, enum ctrl cmd)
         cJSON *client_info = cJSON_CreateObject();
         cJSON_AddStringToObject(client_info, "ip", client->ip);
         cJSON_AddStringToObject(client_info, "userId", client->userId);
+        cJSON_AddStringToObject(client_info, "nickname", client->nickname);
+        cJSON_AddStringToObject(client_info, "avatar_url", client->avatar_url);
         cJSON_AddNumberToObject(client_info, "client_counter", room->client_counter);
         cJSON_AddItemToArray(client_list, client_info);
         client = client->next;
@@ -279,6 +281,7 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     free(lyrics_url);
 
     // 插入到播放列表末尾
+    pthread_mutex_lock(&room->lock);
     playlist_t *tail = room->playlist_tail;
     tail->next = new_song;
     room->playlist_tail = new_song;
@@ -287,7 +290,12 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     if (room->current_song == NULL)
     {
         room->current_song = new_song;
+        pthread_mutex_unlock(&room->lock);
         update_playing_info(room);
+    }
+    else
+    {
+        pthread_mutex_unlock(&room->lock);
     }
     char message[128] = {0};
     snprintf(message, sizeof(message), "添加歌曲：%s", song_name);
@@ -306,6 +314,7 @@ int remove_song_from_playlist(client_info_t *client, const char *song_hash)
         return -1;
     }
 
+    pthread_mutex_lock(&room->lock);
     playlist_t *prev = room->playlist_head;
     playlist_t *curr = prev->next;
 
@@ -315,18 +324,38 @@ int remove_song_from_playlist(client_info_t *client, const char *song_hash)
         {
             char message[256] = {0};
             snprintf(message, sizeof(message), "删除歌曲：%s", curr->song_name);
-            init_room_action(room, client->userId, REMOVE_SONG_FROM_PLAYLIST, message);
-            prev->next = curr->next;
+
+            // 如果删除的是当前正在播放的歌曲，切换到下一首
+            int was_current = (room->current_song == curr);
+            playlist_t *next_song = curr->next;
+
+            prev->next = next_song;
             if (curr == room->playlist_tail)
             {
                 room->playlist_tail = prev;
             }
             free(curr);
+
+            if (was_current)
+            {
+                room->current_song = next_song ? next_song : room->playlist_head->next;
+                pthread_mutex_unlock(&room->lock);
+                init_room_action(room, client->userId, REMOVE_SONG_FROM_PLAYLIST, message);
+                if (room->current_song)
+                {
+                    update_playing_info(room);
+                }
+                return 0;
+            }
+
+            pthread_mutex_unlock(&room->lock);
+            init_room_action(room, client->userId, REMOVE_SONG_FROM_PLAYLIST, message);
             return 0;
         }
         prev = curr;
         curr = curr->next;
     }
+    pthread_mutex_unlock(&room->lock);
 
     return -1; // 未找到歌曲
 }
@@ -378,6 +407,7 @@ int play_next_song_bysystem(rooms_t *room)
     }
     pthread_mutex_unlock(&room->lock);
     update_playing_info(room);
+    return 0;
 }
 
 int play_next_song(client_info_t *client)
@@ -482,7 +512,6 @@ int upsongbyhash(client_info_t *client, const char *song_hash)
 // 获取当前播放进度，用于JSON广播
 const char *get_cur_played_percent(rooms_t *room)
 {
-    playing_info_t playing = room->playing_info;
     cJSON *root = cJSON_CreateObject();
     if (!root)
     {
@@ -491,18 +520,19 @@ const char *get_cur_played_percent(rooms_t *room)
     cJSON *data = cJSON_CreateObject();
     if (!data)
     {
+        cJSON_Delete(root);
         return NULL;
     }
 
-    pthread_mutex_lock(&playing.lock);
+    pthread_mutex_lock(&room->playing_info.lock);
 
-    cJSON_AddNumberToObject(data, "played_percent", playing.played_percent);
+    cJSON_AddNumberToObject(data, "played_percent", room->playing_info.played_percent);
     cJSON_AddNumberToObject(root, "error_code", SUCCESS);
     cJSON_AddStringToObject(root, "status", "success");
     cJSON_AddNumberToObject(root, "action", BROADCAST_SONG_INFO);
     cJSON_AddItemToObject(root, "data", data);
 
-    pthread_mutex_unlock(&playing.lock);
+    pthread_mutex_unlock(&room->playing_info.lock);
 
     const char *json_str = cJSON_Print(root);
     cJSON_Delete(root);
@@ -511,34 +541,35 @@ const char *get_cur_played_percent(rooms_t *room)
 
 const char *get_cur_song_info(rooms_t *room, enum ctrl cmd)
 {
-    playing_info_t playing = room->playing_info;
-
     cJSON *root = cJSON_CreateObject();
     if (!root)
         return NULL;
 
     cJSON *data = cJSON_CreateObject();
     if (!data)
+    {
+        cJSON_Delete(root);
         return NULL;
+    }
 
-    pthread_mutex_lock(&playing.lock);
+    pthread_mutex_lock(&room->playing_info.lock);
 
     cJSON_AddNumberToObject(root, "error_code", SUCCESS);
     cJSON_AddStringToObject(root, "status", "success");
     cJSON_AddNumberToObject(root, "action", cmd);
-    cJSON_AddStringToObject(data, "songname", playing.song_name);
-    cJSON_AddStringToObject(data, "songhash", playing.song_hash);
-    cJSON_AddStringToObject(data, "singername", playing.singer_name);
-    cJSON_AddStringToObject(data, "album_name", playing.album_name);
-    cJSON_AddStringToObject(data, "duration", playing.duration);
-    cJSON_AddStringToObject(data, "lyrics_url", playing.lyrics_url);
-    cJSON_AddStringToObject(data, "song_url", playing.song_url);
-    cJSON_AddStringToObject(data, "cover_url", playing.cover_url);
-    cJSON_AddNumberToObject(data, "played_percent", playing.played_percent);
-    cJSON_AddNumberToObject(data, "is_playing", playing.is_playing);
+    cJSON_AddStringToObject(data, "songname", room->playing_info.song_name);
+    cJSON_AddStringToObject(data, "songhash", room->playing_info.song_hash);
+    cJSON_AddStringToObject(data, "singername", room->playing_info.singer_name);
+    cJSON_AddStringToObject(data, "album_name", room->playing_info.album_name);
+    cJSON_AddStringToObject(data, "duration", room->playing_info.duration);
+    cJSON_AddStringToObject(data, "lyrics_url", room->playing_info.lyrics_url);
+    cJSON_AddStringToObject(data, "song_url", room->playing_info.song_url);
+    cJSON_AddStringToObject(data, "cover_url", room->playing_info.cover_url);
+    cJSON_AddNumberToObject(data, "played_percent", room->playing_info.played_percent);
+    cJSON_AddNumberToObject(data, "is_playing", room->playing_info.is_playing);
     cJSON_AddItemToObject(root, "data", data);
 
-    pthread_mutex_unlock(&playing.lock);
+    pthread_mutex_unlock(&room->playing_info.lock);
 
     const char *json_str = cJSON_PrintUnformatted(root);
 

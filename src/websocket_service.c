@@ -50,7 +50,8 @@ bool insert_client_node(client_info_t *head, client_info_t *new_node)
 }
 
 // 申请节点并填充客户端信息,返回改节点指针
-client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room, const char *userId)
+client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room,
+                                   const char *userId, const char *nickname, const char *avatar_url)
 {
     client_info_t *new_node = (client_info_t *)malloc(sizeof(client_info_t));
     if (!new_node)
@@ -64,6 +65,8 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
     strncpy(new_node->ip, ip, INET_ADDRSTRLEN - 1);
     new_node->room = room;
     strncpy(new_node->userId, userId, 63);
+    if (nickname) strncpy(new_node->nickname, nickname, sizeof(new_node->nickname) - 1);
+    if (avatar_url) strncpy(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url) - 1);
     new_node->next = NULL;
     new_node->prev = NULL;
     if (!insert_client_node(room->client_info, new_node))
@@ -239,6 +242,8 @@ static int client_callback_established(struct lws *wsi)
     lwsl_notice("新的客户端连接建立\n");
     char roomid[64] = {0};
     char userId[64] = {0};
+    char nickname[128] = {0};
+    char avatar_url[512] = {0};
     char client_ip[64] = {0};
     rooms_t *new_room = NULL;
     client_info_t *new_client = NULL;
@@ -258,6 +263,8 @@ static int client_callback_established(struct lws *wsi)
 
     lws_get_urlarg_by_name(wsi, "roomid", roomid, sizeof(roomid));
     lws_get_urlarg_by_name(wsi, "userid", userId, sizeof(userId));
+    lws_get_urlarg_by_name(wsi, "nickname", nickname, sizeof(nickname));
+    lws_get_urlarg_by_name(wsi, "avatar", avatar_url, sizeof(avatar_url));
 
     if (!strlen(roomid) || !strlen(userId))
     {
@@ -269,7 +276,7 @@ static int client_callback_established(struct lws *wsi)
     {
         if (strcmp(room->room_id, roomid) == 0)
         {
-            if (!(new_client = insert_client_info(wsi, client_ip, room, userId)))
+            if (!(new_client = insert_client_info(wsi, client_ip, room, userId, nickname, avatar_url)))
             {
                 lwsl_err("Failed to insert client info\n");
                 return -1;
@@ -311,7 +318,7 @@ static int client_callback_established(struct lws *wsi)
     }
     lwsl_notice("创建房间成功，启动定时器\n");
     lws_sul_schedule(context, 0, &new_room->playing_info.timer, timer_callback, LWS_US_PER_SEC * 5);
-    if (!(new_client = insert_client_info(wsi, client_ip, new_room, userId)))
+    if (!(new_client = insert_client_info(wsi, client_ip, new_room, userId, nickname, avatar_url)))
     {
         lwsl_err("Failed to insert client info\n");
         return -1;
@@ -331,13 +338,13 @@ static int client_callback_closed(struct lws *wsi)
     lwsl_notice("客户端连接关闭\n");
     // 清理客户端节点
     client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
-    rooms_t *room = client->room;
     if (!client)
     {
         lwsl_err("Client info is NULL\n");
         return -1;
     }
-    if (client->room)
+    rooms_t *room = client->room;
+    if (room)
     {
         pthread_mutex_lock(&client->room->lock);
         client_info_t *prev = client->prev;
