@@ -104,28 +104,28 @@ struct ResponseData *http_request(const char *url,
     return response;
 }
 
-// 获取歌词 url（始终返回可 free 的堆内存，调用者必须 free）
+// 获取歌词内容（始终返回可 free 的堆内存，调用者必须 free）
 char *get_lyrics_url(const char *song_hash)
 {
     struct ResponseData *response;
     char url[512] = {0};
-    char *lyrics_url = (char *)malloc(512);
-    if (!lyrics_url)
+    char *lyrics_content = (char *)malloc(4096);  // 歌词内容可能较长
+    if (!lyrics_content)
         return NULL;
-    memset(lyrics_url, 0, 512);
+    memset(lyrics_content, 0, 4096);
     if (!song_hash)
     {
-        return lyrics_url; // 空字符串
+        return lyrics_content; // 空字符串
     }
 
-    // 拼接url
+    // 第一步：根据 hash 获取歌词 id 和 accesskey
     snprintf(url, sizeof(url), "http://%s:%d/search/lyric?hash=%s", SERVICE_IP_ADDRESS, SERVICE_PORT, song_hash);
     response = http_request(url, "GET", NULL, NULL);
     if (!response)
     {
-        return lyrics_url; // 空字符串
+        return lyrics_content; // 空字符串
     }
-    // 开始解析接收到的 json 数据，拼接为最终的歌词 url
+    // 开始解析接收到的 json 数据
     cJSON *root = cJSON_Parse(response->data);
     if (!root)
     {
@@ -136,7 +136,7 @@ char *get_lyrics_url(const char *song_hash)
         }
         free(response->data);
         free(response);
-        return lyrics_url; // 空字符串
+        return lyrics_content; // 空字符串
     }
     cJSON *candidates = cJSON_GetObjectItem(root, "candidates");
     if (!cJSON_IsArray(candidates))
@@ -145,7 +145,7 @@ char *get_lyrics_url(const char *song_hash)
         cJSON_Delete(root);
         free(response->data);
         free(response);
-        return lyrics_url; // 空字符串
+        return lyrics_content; // 空字符串
     }
     cJSON *candidate = cJSON_GetArrayItem(candidates, 0);
     cJSON *id = cJSON_GetObjectItem(candidate, "id");
@@ -156,14 +156,32 @@ char *get_lyrics_url(const char *song_hash)
         cJSON_Delete(root);
         free(response->data);
         free(response);
-        return lyrics_url; // 空字符串
+        return lyrics_content; // 空字符串
     }
-    // 拼接歌词 url
-    snprintf(lyrics_url, 511, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=krc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
+
+    // 第二步：直接下载歌词内容（服务器端完成）
+    char lyric_url[512] = {0};
+    snprintf(lyric_url, sizeof(lyric_url), "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=krc", 
+             SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
+    
+    struct ResponseData *lyric_response = http_request(lyric_url, "GET", NULL, NULL);
+    if (lyric_response)
+    {
+        // 将歌词内容复制到返回缓冲区
+        strncpy(lyrics_content, lyric_response->data, 4095);
+        free(lyric_response->data);
+        free(lyric_response);
+        lwsl_notice("成功获取歌词内容，长度: %zu\n", strlen(lyrics_content));
+    }
+    else
+    {
+        lwsl_err("获取歌词内容失败\n");
+    }
+
     free(response->data);
     free(response);
     cJSON_Delete(root);
-    return lyrics_url;
+    return lyrics_content;
 }
 
 // 获取歌曲 url（始终返回可 free 的堆内存，调用者必须 free）
