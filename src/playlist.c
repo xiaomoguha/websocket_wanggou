@@ -159,7 +159,7 @@ char *get_lyrics_url(const char *song_hash)
         return lyrics_url; // 空字符串
     }
     // 拼接歌词 url
-    snprintf(lyrics_url, 511, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=lrc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
+    snprintf(lyrics_url, 511, "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=krc", SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
     free(response->data);
     free(response);
     cJSON_Delete(root);
