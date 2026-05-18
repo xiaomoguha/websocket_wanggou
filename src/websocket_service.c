@@ -256,24 +256,25 @@ static int client_callback_established(struct lws *wsi)
 
     // 优先从 X-Real-IP / X-Forwarded-For 头获取真实客户端 IP（nginx 反向代理场景）
     {
-        char hdr_real_ip[64] = {0};
-        char hdr_fwd_for[256] = {0};
-        int n = lws_hdr_custom_length(wsi, "x-real-ip:", 10);
-        if (n > 0 && n < (int)sizeof(hdr_real_ip))
+        char hdr_buf[256] = {0};
+        // 尝试读取 X-Real-IP
+        int n = lws_hdr_copy(wsi, hdr_buf, sizeof(hdr_buf), WSI_TOKEN_HTTP_X_REAL_IP);
+        if (n > 0)
         {
-            lws_hdr_custom_copy(wsi, hdr_real_ip, sizeof(hdr_real_ip), "x-real-ip:", 10);
-            strncpy(client_ip, hdr_real_ip, sizeof(client_ip) - 1);
+            strncpy(client_ip, hdr_buf, sizeof(client_ip) - 1);
+            lwsl_notice("从 X-Real-IP 获取真实 IP: %s\n", client_ip);
         }
         else
         {
-            n = lws_hdr_custom_length(wsi, "x-forwarded-for:", 17);
-            if (n > 0 && n < (int)sizeof(hdr_fwd_for))
+            // 尝试读取 X-Forwarded-For
+            n = lws_hdr_copy(wsi, hdr_buf, sizeof(hdr_buf), WSI_TOKEN_HTTP_X_FORWARDED_FOR);
+            if (n > 0)
             {
-                lws_hdr_custom_copy(wsi, hdr_fwd_for, sizeof(hdr_fwd_for), "x-forwarded-for:", 17);
                 // X-Forwarded-For 可能有多个 IP，取第一个
-                char *comma = strchr(hdr_fwd_for, ',');
+                char *comma = strchr(hdr_buf, ',');
                 if (comma) *comma = '\0';
-                strncpy(client_ip, hdr_fwd_for, sizeof(client_ip) - 1);
+                strncpy(client_ip, hdr_buf, sizeof(client_ip) - 1);
+                lwsl_notice("从 X-Forwarded-For 获取真实 IP: %s\n", client_ip);
             }
         }
     }
@@ -356,6 +357,12 @@ static int client_callback_established(struct lws *wsi)
     for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
     {
         print_room_info(room);
+    }
+    // 广播新的客户端信息（新房间也需要广播）
+    {
+        const char *client_list = get_client_list_json(new_room, BROADCAST_CLIENT_LIST);
+        broadcast_response_room(new_room, client_list);
+        free((void *)client_list);
     }
     return 0;
 }
@@ -579,7 +586,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         if (pause_song(client) >= 0)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-            operation_response(client, cur_song_info_json);
+            broadcast_response_room(client->room, cur_song_info_json);
             free((void *)cur_song_info_json);
         }
         else
@@ -591,7 +598,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         if (resume_song(client) >= 0)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-            operation_response(client, cur_song_info_json);
+            broadcast_response_room(client->room, cur_song_info_json);
             free((void *)cur_song_info_json);
         }
         else
