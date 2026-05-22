@@ -209,7 +209,20 @@ void timer_callback(lws_sorted_usec_list_t *sul)
     if (playing_info->is_playing)
     {
         pthread_mutex_lock(&playing_info->lock);
-        duration = atof(playing_info->duration);
+        // 解析 duration：支持 "mm:ss" 和纯秒数两种格式
+        {
+            char *colon = strchr(playing_info->duration, ':');
+            if (colon)
+            {
+                int min = atoi(playing_info->duration);
+                int sec = atoi(colon + 1);
+                duration = min * 60 + sec;
+            }
+            else
+            {
+                duration = atof(playing_info->duration);
+            }
+        }
         time_t now = time(NULL);
         // 更新进度偏移
         double offset = (now - playing_info->last_update_time) / duration;
@@ -222,16 +235,29 @@ void timer_callback(lws_sorted_usec_list_t *sul)
         }
         pthread_mutex_unlock(&playing_info->lock);
     }
+    int song_changed = 0;
     if (playing_info->played_percent >= 1)
     {
+        song_changed = 1;
         play_next_song_bysystem(playing_info->room);
     }
-    // 广播播放信息(有歌曲的时候)
+    // 有歌曲的时候广播
     if (playing_info->room->current_song)
     {
-        const char *cur_song_info_json = get_cur_song_info(playing_info->room, BROADCAST_SONG_INFO);
-        broadcast_response_room(playing_info->room, cur_song_info_json);
-        free((void *)cur_song_info_json);
+        if (song_changed)
+        {
+            // 切歌（包括循环），广播完整歌曲信息
+            const char *song_info_json = get_cur_song_info(playing_info->room, BROADCAST_SONG_INFO);
+            broadcast_response_room(playing_info->room, song_info_json);
+            free((void *)song_info_json);
+        }
+        else
+        {
+            // 正常进度同步
+            const char *progress_json = get_cur_song_progress(playing_info->room);
+            broadcast_response_room(playing_info->room, progress_json);
+            free((void *)progress_json);
+        }
     }
 
     lws_sul_schedule(context, 0, sul, timer_callback, callback_time * LWS_US_PER_MS);
@@ -617,9 +643,23 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             char *coverurl = cJSON_GetObjectItem(params, "coverurl") ? cJSON_GetObjectItem(params, "coverurl")->valuestring : "";
             if (insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl) >= 0)
             {
-                // 一次广播：合并playlist + song_info，避免room->latest_msg被覆盖
+                // 操作者只收到 playlist（不需要 song_info）
+                const char *playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                send_message_to_client(client, playlist_json);
+                free((void *)playlist_json);
+
+                // 其他客户端收到 playlist + song_info
                 const char *combined_json = get_playlist_and_song_info_json(client->room);
-                broadcast_response_room(client->room, combined_json);
+                pthread_mutex_lock(&client->room->lock);
+                strncpy(client->room->latest_msg, combined_json, sizeof(client->room->latest_msg) - 1);
+                pthread_mutex_unlock(&client->room->lock);
+                for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
+                {
+                    if (cur->wsi && client != cur)
+                    {
+                        lws_callback_on_writable(cur->wsi);
+                    }
+                }
                 free((void *)combined_json);
             }
             else
@@ -738,6 +778,64 @@ int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
     int ret = 0;
     switch (reason)
     {
+    // HTTP 请求处理（房间列表接口）
+    case LWS_CALLBACK_HTTP:
+    {
+        char url[128] = {0};
+        lws_hdr_copy(wsi, url, sizeof(url) - 1, WSI_TOKEN_GET_URI);
+
+        if (strcmp(url, "/rooms") == 0)
+        {
+            cJSON *arr = cJSON_CreateArray();
+            for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
+            {
+                cJSON *r = cJSON_CreateObject();
+                cJSON_AddStringToObject(r, "room_id", room->room_id);
+                cJSON_AddNumberToObject(r, "member_count", room->client_counter);
+                if (room->current_song)
+                {
+                    cJSON_AddStringToObject(r, "current_song", room->current_song->song_name);
+                    cJSON_AddStringToObject(r, "singername", room->current_song->singer_name);
+                    cJSON_AddStringToObject(r, "cover_url", room->current_song->cover_url);
+                }
+                cJSON_AddItemToArray(arr, r);
+            }
+            char *json_str = cJSON_PrintUnformatted(arr);
+            cJSON_Delete(arr);
+            size_t json_len = strlen(json_str);
+
+            size_t buf_size = LWS_PRE + 512 + json_len;
+            unsigned char *buf = (unsigned char *)malloc(buf_size);
+            if (!buf)
+            {
+                free(json_str);
+                return -1;
+            }
+            unsigned char *p = &buf[LWS_PRE];
+            int hdr_len = snprintf((char *)p, buf_size - LWS_PRE,
+                                   "HTTP/1.1 200 OK\r\n"
+                                   "Content-Type: application/json\r\n"
+                                   "Access-Control-Allow-Origin: *\r\n"
+                                   "Connection: close\r\n"
+                                   "Content-Length: %zu\r\n"
+                                   "\r\n",
+                                   json_len);
+            lws_write(wsi, p, hdr_len, LWS_WRITE_HTTP_HEADERS);
+
+            p = &buf[LWS_PRE];
+            memcpy(p, json_str, json_len);
+            lws_write(wsi, p, json_len, LWS_WRITE_HTTP);
+
+            free(buf);
+            free(json_str);
+            lws_http_transaction_completed(wsi);
+            return 0;
+        }
+
+        lws_return_http_status(wsi, 404, "Not Found");
+        lws_http_transaction_completed(wsi);
+        return 0;
+    }
     // 过滤新连接请求
     case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
         // ret = client_callback_filter(wsi);
@@ -780,7 +878,7 @@ static void print_usage(const char *prog)
 int main(int argc, const char **argv)
 {
     struct lws_context_creation_info info;
-    const char *iface = "127.0.0.1";
+    const char *iface = "0.0.0.0";
     int port = 3001;
     int opts = 0;
     int daemon_mode = 0;

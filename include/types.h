@@ -11,7 +11,6 @@ typedef struct playlist
     char singer_name[128];
     char album_name[128];
     char duration[16];
-    char lyrics_url[512];
     char cover_url[512];
     struct playlist *next;
 } playlist_t;
@@ -25,7 +24,6 @@ typedef struct playing_info
     char singer_name[128];
     char album_name[128];
     char duration[16];
-    char lyrics_url[512];
     char cover_url[512];
     double played_percent;
     char is_playing;
@@ -90,6 +88,7 @@ enum ctrl
     BROADCAST_SONG_LIST,
     BROADCAST_CLIENT_LIST,
     GET_CLIENT_LIST,
+    BROADCAST_SONG_PROGRESS,
 };
 
 enum CODE

@@ -5,8 +5,7 @@
 #include "websocket_service.h"
 #include "rooms.h"
 
-#define SERVICE_IP_ADDRESS "127.0.0.1"
-#define SERVICE_PORT 3000
+#define SERVICE_BASE_URL "https://xjt-togethertracks.top/api"
 
 extern struct lws_context *context;
 
@@ -104,86 +103,6 @@ struct ResponseData *http_request(const char *url,
     return response;
 }
 
-// 获取歌词内容（始终返回可 free 的堆内存，调用者必须 free）
-char *get_lyrics_url(const char *song_hash)
-{
-    struct ResponseData *response;
-    char url[512] = {0};
-    char *lyrics_content = (char *)malloc(4096);  // 歌词内容可能较长
-    if (!lyrics_content)
-        return NULL;
-    memset(lyrics_content, 0, 4096);
-    if (!song_hash)
-    {
-        return lyrics_content; // 空字符串
-    }
-
-    // 第一步：根据 hash 获取歌词 id 和 accesskey
-    snprintf(url, sizeof(url), "http://%s:%d/search/lyric?hash=%s", SERVICE_IP_ADDRESS, SERVICE_PORT, song_hash);
-    response = http_request(url, "GET", NULL, NULL);
-    if (!response)
-    {
-        return lyrics_content; // 空字符串
-    }
-    // 开始解析接收到的 json 数据
-    cJSON *root = cJSON_Parse(response->data);
-    if (!root)
-    {
-        const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL)
-        {
-            lwsl_err("JSON 解析错误: %s\n", error_ptr);
-        }
-        free(response->data);
-        free(response);
-        return lyrics_content; // 空字符串
-    }
-    cJSON *candidates = cJSON_GetObjectItem(root, "candidates");
-    if (!cJSON_IsArray(candidates))
-    {
-        lwsl_err("JSON 解析错误: candidates 不是数组");
-        cJSON_Delete(root);
-        free(response->data);
-        free(response);
-        return lyrics_content; // 空字符串
-    }
-    cJSON *candidate = cJSON_GetArrayItem(candidates, 0);
-    cJSON *id = cJSON_GetObjectItem(candidate, "id");
-    cJSON *accesskey = cJSON_GetObjectItem(candidate, "accesskey");
-    if (!id || !accesskey)
-    {
-        lwsl_err("JSON 解析错误: 缺少 id 或 accesskey");
-        cJSON_Delete(root);
-        free(response->data);
-        free(response);
-        return lyrics_content; // 空字符串
-    }
-
-    // 第二步：直接下载歌词内容（服务器端完成）
-    char lyric_url[512] = {0};
-    snprintf(lyric_url, sizeof(lyric_url), "http://%s:%d/lyric?id=%s&accesskey=%s&decode=true&fmt=krc", 
-             SERVICE_IP_ADDRESS, SERVICE_PORT, id->valuestring, accesskey->valuestring);
-    
-    struct ResponseData *lyric_response = http_request(lyric_url, "GET", NULL, NULL);
-    if (lyric_response)
-    {
-        // 将歌词内容复制到返回缓冲区
-        strncpy(lyrics_content, lyric_response->data, 4095);
-        free(lyric_response->data);
-        free(lyric_response);
-        lwsl_notice("成功获取歌词内容，长度: %zu\n", strlen(lyrics_content));
-    }
-    else
-    {
-        lwsl_err("获取歌词内容失败\n");
-    }
-
-    free(response->data);
-    free(response);
-    cJSON_Delete(root);
-    return lyrics_content;
-}
-
 // 获取歌曲 url（始终返回可 free 的堆内存，调用者必须 free）
 char *get_song_url(const char *song_hash)
 {
@@ -198,7 +117,7 @@ char *get_song_url(const char *song_hash)
         return song_url; // 空字符串
     }
     // 拼接url
-    snprintf(url, sizeof(url), "http://%s:%d/song/url?hash=%s", SERVICE_IP_ADDRESS, SERVICE_PORT, song_hash);
+    snprintf(url, sizeof(url), "%s/song/url?hash=%s", SERVICE_BASE_URL, song_hash);
     response = http_request(url, "GET", NULL, NULL);
     if (!response)
     {
@@ -291,11 +210,6 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     strncpy(new_song->duration, duration, sizeof(new_song->duration) - 1);
     strncpy(new_song->cover_url, cover_url, sizeof(new_song->cover_url) - 1);
     new_song->next = NULL;
-
-    char *lyrics_url = get_lyrics_url(song_hash);
-    // 获取歌词 url 并且填充进去
-    strncpy(new_song->lyrics_url, lyrics_url, sizeof(new_song->lyrics_url));
-    free(lyrics_url);
 
     // 插入到播放列表末尾
     pthread_mutex_lock(&room->lock);
@@ -394,7 +308,6 @@ int update_playing_info(rooms_t *room)
     strncpy(playing_info->singer_name, curr->singer_name, sizeof(playing_info->singer_name) - 1);
     strncpy(playing_info->album_name, curr->album_name, sizeof(playing_info->album_name) - 1);
     strncpy(playing_info->duration, curr->duration, sizeof(playing_info->duration) - 1);
-    strncpy(playing_info->lyrics_url, curr->lyrics_url, sizeof(playing_info->lyrics_url) - 1);
     strncpy(playing_info->cover_url, curr->cover_url, sizeof(playing_info->cover_url) - 1);
     // 获取歌曲 url 填充进去
     char *song_url = get_song_url(curr->song_hash);
@@ -526,6 +439,37 @@ int upsongbyhash(client_info_t *client, const char *song_hash)
     return -1; // 未找到歌曲
 }
 
+// 获取当前歌曲进度同步信息（轻量级，仅 songhash + played_percent + is_playing）
+const char *get_cur_song_progress(rooms_t *room)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+        return NULL;
+
+    cJSON *data = cJSON_CreateObject();
+    if (!data)
+    {
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    pthread_mutex_lock(&room->playing_info.lock);
+
+    cJSON_AddNumberToObject(root, "error_code", SUCCESS);
+    cJSON_AddStringToObject(root, "status", "success");
+    cJSON_AddNumberToObject(root, "action", BROADCAST_SONG_PROGRESS);
+    cJSON_AddStringToObject(data, "songhash", room->playing_info.song_hash);
+    cJSON_AddNumberToObject(data, "played_percent", room->playing_info.played_percent);
+    cJSON_AddNumberToObject(data, "is_playing", room->playing_info.is_playing);
+    cJSON_AddItemToObject(root, "data", data);
+
+    pthread_mutex_unlock(&room->playing_info.lock);
+
+    const char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str;
+}
+
 // 获取当前播放进度，用于JSON广播
 const char *get_cur_played_percent(rooms_t *room)
 {
@@ -579,7 +523,6 @@ const char *get_cur_song_info(rooms_t *room, enum ctrl cmd)
     cJSON_AddStringToObject(data, "singername", room->playing_info.singer_name);
     cJSON_AddStringToObject(data, "album_name", room->playing_info.album_name);
     cJSON_AddStringToObject(data, "duration", room->playing_info.duration);
-    cJSON_AddStringToObject(data, "lyrics_url", room->playing_info.lyrics_url);
     cJSON_AddStringToObject(data, "song_url", room->playing_info.song_url);
     cJSON_AddStringToObject(data, "cover_url", room->playing_info.cover_url);
     cJSON_AddNumberToObject(data, "played_percent", room->playing_info.played_percent);
@@ -698,7 +641,6 @@ const char *get_playlist_and_song_info_json(rooms_t *room)
         cJSON_AddStringToObject(data, "singername", room->playing_info.singer_name);
         cJSON_AddStringToObject(data, "album_name", room->playing_info.album_name);
         cJSON_AddStringToObject(data, "duration", room->playing_info.duration);
-        cJSON_AddStringToObject(data, "lyrics_url", room->playing_info.lyrics_url);
         cJSON_AddStringToObject(data, "song_url", room->playing_info.song_url);
         cJSON_AddStringToObject(data, "cover_url", room->playing_info.cover_url);
         cJSON_AddNumberToObject(data, "played_percent", room->playing_info.played_percent);
