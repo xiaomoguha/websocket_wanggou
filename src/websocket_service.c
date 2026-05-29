@@ -127,6 +127,35 @@ static void broadcast_response_room(rooms_t *room, const char *msg)
     }
 }
 
+// 将数据 JSON 与操作日志 JSON 合并为一条消息（避免连续广播互相覆盖）
+static char *combine_json_with_actions(const char *data_json, const char *actions_json_str)
+{
+    if (!data_json)
+        return NULL;
+
+    cJSON *data_root = cJSON_Parse(data_json);
+    if (!data_root)
+        return NULL;
+
+    if (actions_json_str)
+    {
+        cJSON *actions_root = cJSON_Parse(actions_json_str);
+        if (actions_root)
+        {
+            cJSON *actions_arr = cJSON_DetachItemFromObject(actions_root, "actions");
+            if (actions_arr)
+            {
+                cJSON_AddItemToObject(data_root, "actions", actions_arr);
+            }
+            cJSON_Delete(actions_root);
+        }
+    }
+
+    char *result = cJSON_PrintUnformatted(data_root);
+    cJSON_Delete(data_root);
+    return result;
+}
+
 // 操作回复广播（操作者回复成功与否，其他客户端回复最新数据）
 static void operation_response(client_info_t *client, const char *msg)
 {
@@ -342,6 +371,19 @@ static int client_callback_established(struct lws *wsi)
             {
                 print_room_info(room);
             }
+            // 记录用户加入操作
+            {
+                char join_msg[256] = {0};
+                snprintf(join_msg, sizeof(join_msg), "加入了房间");
+                init_room_action(room, userId, nickname, avatar_url, 0, join_msg);
+                // 广播操作日志给所有人
+                const char *actions_json = get_room_actions_json(room, 1);
+                if (actions_json)
+                {
+                    broadcast_response_room(room, actions_json);
+                    free((void *)actions_json);
+                }
+            }
             // 广播新的客户端信息
             {
                 const char *client_list = get_client_list_json(room, BROADCAST_CLIENT_LIST);
@@ -353,6 +395,15 @@ static int client_callback_established(struct lws *wsi)
                 const char *playlist_json = get_playlist_json(room, GET_PLAYLIST);
                 send_message_to_client(new_client, playlist_json);
                 free((void *)playlist_json);
+            }
+            // 发送操作历史给新客户端
+            {
+                const char *actions_json = get_room_actions_json(room, 50);
+                if (actions_json)
+                {
+                    send_message_to_client(new_client, actions_json);
+                    free((void *)actions_json);
+                }
             }
             if (room->current_song)
             {
@@ -383,6 +434,12 @@ static int client_callback_established(struct lws *wsi)
     for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
     {
         print_room_info(room);
+    }
+    // 记录创建者加入操作
+    {
+        char join_msg[256] = {0};
+        snprintf(join_msg, sizeof(join_msg), "创建了房间");
+        init_room_action(new_room, userId, nickname, avatar_url, 0, join_msg);
     }
     // 广播新的客户端信息（新房间也需要广播）
     {
@@ -446,29 +503,37 @@ static int client_callback_closed(struct lws *wsi)
 
 static void error_response(client_info_t *client, const char *msg)
 {
-    // 1. 创建根对象 {}
     cJSON *root = cJSON_CreateObject();
     if (!root)
         return;
 
-    // 2. 添加字段
     cJSON_AddNumberToObject(root, "error_code", -FAIL);
     cJSON_AddStringToObject(root, "status", "error");
     cJSON_AddStringToObject(root, "message", msg);
 
-    // 3. 转为字符串（注意：返回的字符串需要 free()）
     char *json_str = cJSON_PrintUnformatted(root);
-
-    // 4. 释放 cJSON 对象（但保留字符串）
     cJSON_Delete(root);
 
-    pthread_mutex_lock(&client->lock);
-    strncpy(client->latest_msg, json_str, sizeof(client->latest_msg) - 1);
-    client->is_data_to_send = 1;
-    pthread_mutex_unlock(&client->lock);
+    send_message_to_client(client, json_str);
     free(json_str);
-    lws_callback_on_writable(client->wsi);
-    lws_cancel_service(context);
+}
+
+static void error_response_with_action(client_info_t *client, const char *msg, int action)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+        return;
+
+    cJSON_AddNumberToObject(root, "error_code", -FAIL);
+    cJSON_AddStringToObject(root, "status", "error");
+    cJSON_AddStringToObject(root, "message", msg);
+    cJSON_AddNumberToObject(root, "action", action);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    send_message_to_client(client, json_str);
+    free(json_str);
 }
 
 static void success_response(client_info_t *client, const char *msg)
@@ -484,22 +549,22 @@ static void success_response(client_info_t *client, const char *msg)
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
-    pthread_mutex_lock(&client->lock);
-    strncpy(client->latest_msg, json_str, sizeof(client->latest_msg) - 1);
-    client->is_data_to_send = 1;
-    pthread_mutex_unlock(&client->lock);
+    send_message_to_client(client, json_str);
     free(json_str);
-    lws_callback_on_writable(client->wsi);
-    lws_cancel_service(context);
 }
-// 某客户端单独发送信息
+// 某客户端单独发送信息（入队）
 static void send_message_to_client(client_info_t *client, const char *msg)
 {
-    if (!client)
+    if (!client || !msg)
         return;
     pthread_mutex_lock(&client->lock);
-    strncpy(client->latest_msg, msg, sizeof(client->latest_msg) - 1);
-    client->is_data_to_send = 1;
+    if (client->msg_queue_count < CLIENT_MSG_QUEUE_SIZE)
+    {
+        int slot = (client->msg_queue_head + client->msg_queue_count) % CLIENT_MSG_QUEUE_SIZE;
+        strncpy(client->msg_queue[slot], msg, sizeof(client->msg_queue[slot]) - 1);
+        client->msg_queue[slot][sizeof(client->msg_queue[slot]) - 1] = '\0';
+        client->msg_queue_count++;
+    }
     pthread_mutex_unlock(&client->lock);
     lws_callback_on_writable(client->wsi);
     lws_cancel_service(context);
@@ -514,7 +579,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         return -1;
     }
     // 复制到本地缓冲区，避免修改 libwebsockets 的只读输入缓冲区
-    if (len >= sizeof(client->latest_msg))
+    if (len >= sizeof(client->msg_queue[0]))
     {
         lwsl_err("消息过长，丢弃 (长度: %zu)\n", len);
         return 0;
@@ -577,8 +642,14 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         if (play_next_song(client) >= 0)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-            operation_response(client, cur_song_info_json);
+            const char *actions_json = get_room_actions_json(client->room, 1);
+            char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
+            operation_response(client, combined ? combined : cur_song_info_json);
+            // 操作者也需要收到操作日志
+            if (actions_json) { send_message_to_client(client, actions_json); }
+            free(combined);
             free((void *)cur_song_info_json);
+            free((void *)actions_json);
         }
         else
         {
@@ -594,8 +665,13 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 if (playbysonghash(client, songhash->valuestring) >= 0)
                 {
                     const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-                    operation_response(client, cur_song_info_json);
+                    const char *actions_json = get_room_actions_json(client->room, 1);
+                    char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
+                    operation_response(client, combined ? combined : cur_song_info_json);
+                    if (actions_json) { send_message_to_client(client, actions_json); }
+                    free(combined);
                     free((void *)cur_song_info_json);
+                    free((void *)actions_json);
                     return 0;
                 }
             }
@@ -612,8 +688,12 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         if (pause_song(client) >= 0)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-            broadcast_response_room(client->room, cur_song_info_json);
+            const char *actions_json = get_room_actions_json(client->room, 1);
+            char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
+            broadcast_response_room(client->room, combined ? combined : cur_song_info_json);
+            free(combined);
             free((void *)cur_song_info_json);
+            free((void *)actions_json);
         }
         else
         {
@@ -624,8 +704,12 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         if (resume_song(client) >= 0)
         {
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
-            broadcast_response_room(client->room, cur_song_info_json);
+            const char *actions_json = get_room_actions_json(client->room, 1);
+            char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
+            broadcast_response_room(client->room, combined ? combined : cur_song_info_json);
+            free(combined);
             free((void *)cur_song_info_json);
+            free((void *)actions_json);
         }
         else
         {
@@ -643,15 +727,21 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             char *coverurl = cJSON_GetObjectItem(params, "coverurl") ? cJSON_GetObjectItem(params, "coverurl")->valuestring : "";
             if (insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl) >= 0)
             {
-                // 操作者只收到 playlist（不需要 song_info）
+                // 操作者收到 playlist + 操作日志
                 const char *playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 send_message_to_client(client, playlist_json);
+                const char *operator_actions = get_room_actions_json(client->room, 1);
+                if (operator_actions) { send_message_to_client(client, operator_actions); free((void *)operator_actions); }
                 free((void *)playlist_json);
 
-                // 其他客户端收到 playlist + song_info
+                // 其他客户端收到 playlist + song_info + 操作日志（合并为一条消息避免覆盖）
                 const char *combined_json = get_playlist_and_song_info_json(client->room);
+                const char *actions_json = get_room_actions_json(client->room, 1);
+                char *final = combine_json_with_actions(combined_json, actions_json);
+                const char *broadcast_msg = final ? final : combined_json;
+
                 pthread_mutex_lock(&client->room->lock);
-                strncpy(client->room->latest_msg, combined_json, sizeof(client->room->latest_msg) - 1);
+                strncpy(client->room->latest_msg, broadcast_msg, sizeof(client->room->latest_msg) - 1);
                 pthread_mutex_unlock(&client->room->lock);
                 for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
                 {
@@ -660,11 +750,13 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                         lws_callback_on_writable(cur->wsi);
                     }
                 }
+                free(final);
                 free((void *)combined_json);
+                free((void *)actions_json);
             }
             else
             {
-                error_response(client, "fail!");
+                error_response_with_action(client, "该歌曲已在播放列表中", ADD_SONG_TO_PLAYLIST);
             }
         }
         else
@@ -678,8 +770,12 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             if (remove_song_from_playlist(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
-                broadcast_response_room(client->room, cur_playlist_json);
+                const char *actions_json = get_room_actions_json(client->room, 1);
+                char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
+                broadcast_response_room(client->room, combined ? combined : cur_playlist_json);
+                free(combined);
                 free((void *)cur_playlist_json);
+                free((void *)actions_json);
             }
             else
             {
@@ -697,8 +793,12 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             if (upsongbyhash(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
-                broadcast_response_room(client->room, cur_playlist_json);
+                const char *actions_json = get_room_actions_json(client->room, 1);
+                char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
+                broadcast_response_room(client->room, combined ? combined : cur_playlist_json);
+                free(combined);
                 free((void *)cur_playlist_json);
+                free((void *)actions_json);
             }
             else
             {
@@ -718,9 +818,37 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         }
         break;
     case GET_CLIENT_LIST:
-        const char *client_list_json = get_client_list_json(client->room, GET_CLIENT_LIST);
-        client_list_json ? send_message_to_client(client, client_list_json) : error_response(client, "fail!");
-        free((void *)client_list_json);
+        {
+            const char *client_list_json = get_client_list_json(client->room, GET_CLIENT_LIST);
+            client_list_json ? send_message_to_client(client, client_list_json) : error_response(client, "fail!");
+            free((void *)client_list_json);
+        }
+        break;
+    case SEND_CHAT:
+        {
+            cJSON *msg_item = params ? cJSON_GetObjectItem(params, "message") : NULL;
+            if (cJSON_IsString(msg_item) && strlen(msg_item->valuestring) > 0)
+            {
+                cJSON *chat_root = cJSON_CreateObject();
+                cJSON *chat_data = cJSON_CreateObject();
+                cJSON_AddNumberToObject(chat_root, "action", BROADCAST_CHAT);
+                cJSON_AddStringToObject(chat_root, "status", "success");
+                cJSON_AddStringToObject(chat_data, "userid", client->userId);
+                cJSON_AddStringToObject(chat_data, "nickname", client->nickname);
+                cJSON_AddStringToObject(chat_data, "avatar_url", client->avatar_url);
+                cJSON_AddStringToObject(chat_data, "message", msg_item->valuestring);
+                cJSON_AddNumberToObject(chat_data, "time", (double)time(NULL));
+                cJSON_AddItemToObject(chat_root, "data", chat_data);
+                char *chat_json = cJSON_PrintUnformatted(chat_root);
+                cJSON_Delete(chat_root);
+                broadcast_response_room(client->room, chat_json);
+                free(chat_json);
+            }
+            else
+            {
+                error_response(client, "消息不能为空");
+            }
+        }
         break;
     default:
         lwsl_err("未识别的操作！");
@@ -739,11 +867,14 @@ static int client_callback_wirtable(struct lws *wsi)
         lwsl_err("Client info is NULL\n");
         return -1;
     }
+
+    // 优先发送个人消息队列
     pthread_mutex_lock(&client->lock);
-    if (client->is_data_to_send)
+    if (client->msg_queue_count > 0)
     {
-        strcpy(local_msg, client->latest_msg);
-        client->is_data_to_send = 0;
+        strcpy(local_msg, client->msg_queue[client->msg_queue_head]);
+        client->msg_queue_head = (client->msg_queue_head + 1) % CLIENT_MSG_QUEUE_SIZE;
+        client->msg_queue_count--;
     }
     pthread_mutex_unlock(&client->lock);
 
@@ -755,9 +886,16 @@ static int client_callback_wirtable(struct lws *wsi)
         memcpy(clnent_p, local_msg, client_n);
         lws_write(wsi, clnent_p, client_n, LWS_WRITE_TEXT);
         lwsl_notice("向%s发送消息: %s\n", client->ip, local_msg);
+
+        // 队列还有消息，继续触发可写回调
+        if (client->msg_queue_count > 0)
+        {
+            lws_callback_on_writable(wsi);
+        }
         return 0;
     }
 
+    // 没有个人消息，发送房间广播
     pthread_mutex_lock(&client->room->lock);
     strcpy(local_msg, client->room->latest_msg);
     pthread_mutex_unlock(&client->room->lock);
@@ -828,12 +966,12 @@ int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 
             free(buf);
             free(json_str);
-            lws_http_transaction_completed(wsi);
+            (void)lws_http_transaction_completed(wsi);
             return 0;
         }
 
         lws_return_http_status(wsi, 404, "Not Found");
-        lws_http_transaction_completed(wsi);
+        (void)lws_http_transaction_completed(wsi);
         return 0;
     }
     // 过滤新连接请求

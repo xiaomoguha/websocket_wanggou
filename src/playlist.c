@@ -196,6 +196,18 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
         return -1;
     }
 
+    // 检查歌曲是否已存在
+    pthread_mutex_lock(&room->lock);
+    for (playlist_t *cur = room->playlist_head->next; cur != NULL; cur = cur->next)
+    {
+        if (strcmp(cur->song_hash, song_hash) == 0)
+        {
+            pthread_mutex_unlock(&room->lock);
+            return -2; // 歌曲已存在
+        }
+    }
+    pthread_mutex_unlock(&room->lock);
+
     playlist_t *new_song = (playlist_t *)malloc(sizeof(playlist_t));
     if (!new_song)
     {
@@ -209,6 +221,8 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     strncpy(new_song->album_name, album_name, sizeof(new_song->album_name) - 1);
     strncpy(new_song->duration, duration, sizeof(new_song->duration) - 1);
     strncpy(new_song->cover_url, cover_url, sizeof(new_song->cover_url) - 1);
+    strncpy(new_song->added_by_nickname, client->nickname, sizeof(new_song->added_by_nickname) - 1);
+    strncpy(new_song->added_by_avatar, client->avatar_url, sizeof(new_song->added_by_avatar) - 1);
     new_song->next = NULL;
 
     // 插入到播放列表末尾
@@ -230,7 +244,7 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     }
     char message[128] = {0};
     snprintf(message, sizeof(message), "添加歌曲：%s", song_name);
-    init_room_action(room, client->userId, ADD_SONG_TO_PLAYLIST, message);
+    init_room_action(room, client->userId, client->nickname, client->avatar_url, ADD_SONG_TO_PLAYLIST, message);
     return 0;
 }
 
@@ -271,7 +285,7 @@ int remove_song_from_playlist(client_info_t *client, const char *song_hash)
             {
                 room->current_song = next_song ? next_song : room->playlist_head->next;
                 pthread_mutex_unlock(&room->lock);
-                init_room_action(room, client->userId, REMOVE_SONG_FROM_PLAYLIST, message);
+                init_room_action(room, client->userId, client->nickname, client->avatar_url, REMOVE_SONG_FROM_PLAYLIST, message);
                 if (room->current_song)
                 {
                     update_playing_info(room);
@@ -280,7 +294,7 @@ int remove_song_from_playlist(client_info_t *client, const char *song_hash)
             }
 
             pthread_mutex_unlock(&room->lock);
-            init_room_action(room, client->userId, REMOVE_SONG_FROM_PLAYLIST, message);
+            init_room_action(room, client->userId, client->nickname, client->avatar_url, REMOVE_SONG_FROM_PLAYLIST, message);
             return 0;
         }
         prev = curr;
@@ -359,7 +373,7 @@ int play_next_song(client_info_t *client)
     }
     char message[1024] = {0};
     snprintf(message, sizeof(message), "播放了下一首:%s", room->current_song->song_name);
-    init_room_action(room, client->userId, PLAY_BY_SONG_HASH, message);
+    init_room_action(room, client->userId, client->nickname, client->avatar_url, PLAY_BY_SONG_HASH, message);
     pthread_mutex_unlock(&room->lock);
     update_playing_info(room);
 
@@ -385,7 +399,7 @@ int playbysonghash(client_info_t *client, const char *song_hash)
             room->current_song = curr;
             char message[1024] = {0};
             snprintf(message, sizeof(message), "播放了%s", room->current_song->song_name);
-            init_room_action(room, client->userId, PLAY_BY_SONG_HASH, message);
+            init_room_action(room, client->userId, client->nickname, client->avatar_url, PLAY_BY_SONG_HASH, message);
             pthread_mutex_unlock(&room->lock);
             update_playing_info(room);
             return 0;
@@ -418,7 +432,7 @@ int upsongbyhash(client_info_t *client, const char *song_hash)
         {
             char message[256] = {0};
             snprintf(message, sizeof(message), "将歌曲置顶：%s", curr->song_name);
-            init_room_action(room, client->userId, UP_SONGBYHASH, message);
+            init_room_action(room, client->userId, client->nickname, client->avatar_url, UP_SONGBYHASH, message);
             // 找到歌曲，进行置顶操作
             prev->next = curr->next;
             if (curr == room->playlist_tail)
@@ -549,7 +563,7 @@ int pause_song(client_info_t *client)
     room->playing_info.is_playing = 0;
     room->playing_info.last_update_time = time(NULL);
     pthread_mutex_unlock(&room->playing_info.lock);
-    init_room_action(room, client->userId, PAUSE_SONG, "暂停播放");
+    init_room_action(room, client->userId, client->nickname, client->avatar_url, PAUSE_SONG, "暂停播放");
     return 0;
 }
 int resume_song(client_info_t *client)
@@ -565,7 +579,7 @@ int resume_song(client_info_t *client)
     room->playing_info.is_playing = 1;
     room->playing_info.last_update_time = time(NULL);
     pthread_mutex_unlock(&room->playing_info.lock);
-    init_room_action(room, client->userId, RESUME_SONG, "继续播放");
+    init_room_action(room, client->userId, client->nickname, client->avatar_url, RESUME_SONG, "继续播放");
     lws_sul_schedule(context, 0, &(room->playing_info).timer, timer_callback, 1 * LWS_US_PER_SEC);
     return 0;
 }
@@ -588,6 +602,8 @@ const char *get_playlist_json(rooms_t *room, enum ctrl cmd)
         cJSON_AddStringToObject(item, "album_name", curr->album_name);
         cJSON_AddStringToObject(item, "duration", curr->duration);
         cJSON_AddStringToObject(item, "cover_url", curr->cover_url);
+        cJSON_AddStringToObject(item, "added_by_nickname", curr->added_by_nickname);
+        cJSON_AddStringToObject(item, "added_by_avatar", curr->added_by_avatar);
         cJSON_AddItemToArray(playlist, item);
         curr = curr->next;
     }
@@ -621,6 +637,8 @@ const char *get_playlist_and_song_info_json(rooms_t *room)
         cJSON_AddStringToObject(item, "album_name", curr->album_name);
         cJSON_AddStringToObject(item, "duration", curr->duration);
         cJSON_AddStringToObject(item, "cover_url", curr->cover_url);
+        cJSON_AddStringToObject(item, "added_by_nickname", curr->added_by_nickname);
+        cJSON_AddStringToObject(item, "added_by_avatar", curr->added_by_avatar);
         cJSON_AddItemToArray(playlist, item);
         curr = curr->next;
     }
@@ -652,4 +670,37 @@ const char *get_playlist_and_song_info_json(rooms_t *room)
     const char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return json_str;
+}
+
+// 获取房间最近 N 条操作记录
+const char *get_room_actions_json(rooms_t *room, int max_count)
+{
+    if (!room || !room->room_ctrl_head)
+        return NULL;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *actions = cJSON_CreateArray();
+
+    pthread_mutex_lock(&room->lock);
+    int count = 0;
+    for (room_ctrl_t *cur = room->room_ctrl_head->next; cur && count < max_count; cur = cur->next, count++)
+    {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "userid", cur->userid);
+        cJSON_AddStringToObject(item, "nickname", cur->nickname);
+        cJSON_AddStringToObject(item, "avatar_url", cur->avatar_url);
+        cJSON_AddNumberToObject(item, "action", cur->action);
+        cJSON_AddStringToObject(item, "message", cur->action_message);
+        cJSON_AddNumberToObject(item, "time", (double)cur->action_time);
+        cJSON_AddItemToArray(actions, item);
+    }
+    pthread_mutex_unlock(&room->lock);
+
+    cJSON_AddItemToObject(root, "actions", actions);
+    cJSON_AddNumberToObject(root, "action", BROADCAST_ROOM_ACTION);
+    cJSON_AddStringToObject(root, "status", "success");
+
+    const char *json_str2 = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str2;
 }

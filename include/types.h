@@ -12,6 +12,8 @@ typedef struct playlist
     char album_name[128];
     char duration[16];
     char cover_url[512];
+    char added_by_nickname[128];
+    char added_by_avatar[512];
     struct playlist *next;
 } playlist_t;
 // 正在播放的歌曲信息
@@ -33,6 +35,7 @@ typedef struct playing_info
     pthread_mutex_t lock;
 } playing_info_t;
 // 客户端信息
+#define CLIENT_MSG_QUEUE_SIZE 8
 typedef struct client_info
 {
     struct lws *wsi;
@@ -41,8 +44,9 @@ typedef struct client_info
     char userId[64];
     char nickname[128];
     char avatar_url[512];
-    char latest_msg[4096];
-    char is_data_to_send;
+    char msg_queue[CLIENT_MSG_QUEUE_SIZE][4096];
+    int msg_queue_head;
+    int msg_queue_count;
     struct client_info *next;
     struct client_info *prev;
     pthread_mutex_t lock;
@@ -51,6 +55,8 @@ typedef struct client_info
 typedef struct room_ctrl
 {
     char userid[64];
+    char nickname[128];
+    char avatar_url[512];
     char action;
     char action_message[512];
     time_t action_time;
@@ -89,6 +95,9 @@ enum ctrl
     BROADCAST_CLIENT_LIST,
     GET_CLIENT_LIST,
     BROADCAST_SONG_PROGRESS,
+    SEND_CHAT = 300,
+    BROADCAST_CHAT,
+    BROADCAST_ROOM_ACTION,
 };
 
 enum CODE

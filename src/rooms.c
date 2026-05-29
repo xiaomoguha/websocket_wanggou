@@ -23,7 +23,7 @@ bool insert_room_action(rooms_t *room, room_ctrl_t *new_node)
     return true;
 }
 // 新建操作节点并插入链表中
-bool init_room_action(rooms_t *room, char *userid, char action, char *action_message)
+bool init_room_action(rooms_t *room, char *userid, char *nickname, char *avatar_url, char action, char *action_message)
 {
     if (room == NULL || userid == NULL || action_message == NULL)
     {
@@ -32,8 +32,11 @@ bool init_room_action(rooms_t *room, char *userid, char action, char *action_mes
     room_ctrl_t *new_node = (room_ctrl_t *)malloc(sizeof(room_ctrl_t));
     memset(new_node, 0, sizeof(room_ctrl_t));
     strncpy(new_node->userid, userid, 63);
+    if (nickname) strncpy(new_node->nickname, nickname, sizeof(new_node->nickname) - 1);
+    if (avatar_url) strncpy(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url) - 1);
     new_node->action = action;
     strncpy(new_node->action_message, action_message, 511);
+    new_node->action_time = time(NULL);
     return insert_room_action(room, new_node);
 }
 // 释放房间操作链表
