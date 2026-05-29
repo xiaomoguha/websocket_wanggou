@@ -480,13 +480,27 @@ static int client_callback_closed(struct lws *wsi)
         }
         client->room->client_counter--;
         pthread_mutex_unlock(&client->room->lock);
+
+        // 记录退出操作并广播给房间内其他人
+        char leave_msg[256] = {0};
+        snprintf(leave_msg, sizeof(leave_msg), "离开了房间");
+        init_room_action(room, client->userId, client->nickname, client->avatar_url, BROADCAST_ROOM_ACTION, leave_msg);
+
+        const char *actions_json = get_room_actions_json(room, 1);
+        const char *client_list_json = get_client_list_json(room, BROADCAST_CLIENT_LIST);
+        char *combined = combine_json_with_actions(client_list_json, actions_json);
+        broadcast_response_room(room, combined ? combined : client_list_json);
+        free(combined);
+        free((void *)actions_json);
+        free((void *)client_list_json);
+
         free(client);
         lwsl_notice("客户端信息已清理\n");
     }
     lws_set_opaque_user_data(wsi, NULL);
 
     // 如果房间已经没有客户端，则删除房间信息
-    if (room->client_counter == 0)
+    if (room && room->client_counter == 0)
     {
         remove_room_node(g_rooms_list, room);
         lwsl_notice("房间信息已清理\n");
