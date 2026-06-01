@@ -115,6 +115,7 @@ static void broadcast_response_room(rooms_t *room, const char *msg)
     pthread_mutex_lock(&room->lock);
     strncpy(room->latest_msg, msg, sizeof(room->latest_msg));
     room->latest_msg[sizeof(room->latest_msg) - 1] = '\0';
+    room->broadcast_version++;
     pthread_mutex_unlock(&room->lock);
 
     // 遍历所有用户
@@ -580,6 +581,14 @@ static void send_message_to_client(client_info_t *client, const char *msg)
         client->msg_queue[slot][sizeof(client->msg_queue[slot]) - 1] = '\0';
         client->msg_queue_count++;
     }
+    else
+    {
+        // 队列满，丢弃最旧的消息，推入新消息
+        client->msg_queue_head = (client->msg_queue_head + 1) % CLIENT_MSG_QUEUE_SIZE;
+        int slot = (client->msg_queue_head + client->msg_queue_count - 1) % CLIENT_MSG_QUEUE_SIZE;
+        strncpy(client->msg_queue[slot], msg, sizeof(client->msg_queue[slot]) - 1);
+        client->msg_queue[slot][sizeof(client->msg_queue[slot]) - 1] = '\0';
+    }
     pthread_mutex_unlock(&client->lock);
     lws_callback_on_writable(client->wsi);
     lws_cancel_service(context);
@@ -910,10 +919,19 @@ static int client_callback_wirtable(struct lws *wsi)
         return 0;
     }
 
-    // 没有个人消息，发送房间广播
+    // 没有个人消息，发送房间广播（仅当内容更新时）
     pthread_mutex_lock(&client->room->lock);
-    strcpy(local_msg, client->room->latest_msg);
+    if (client->room->broadcast_version != client->last_broadcast_version)
+    {
+        strcpy(local_msg, client->room->latest_msg);
+        client->last_broadcast_version = client->room->broadcast_version;
+    }
     pthread_mutex_unlock(&client->room->lock);
+
+    if (!strlen(local_msg))
+    {
+        return 0;
+    }
 
     unsigned char buffer[LWS_PRE + sizeof(local_msg)];
     unsigned char *p = &buffer[LWS_PRE];

@@ -47,6 +47,7 @@ typedef struct client_info
     char msg_queue[CLIENT_MSG_QUEUE_SIZE][4096];
     int msg_queue_head;
     int msg_queue_count;
+    unsigned int last_broadcast_version;
     struct client_info *next;
     struct client_info *prev;
     pthread_mutex_t lock;
@@ -70,6 +71,7 @@ typedef struct rooms
     unsigned int client_counter;
     client_info_t *client_info;
     char latest_msg[4096];
+    unsigned int broadcast_version;
     pthread_mutex_t lock;
     playlist_t *playlist_head;
     playlist_t *playlist_tail;
