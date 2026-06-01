@@ -376,19 +376,16 @@ static int client_callback_established(struct lws *wsi)
                 char join_msg[256] = {0};
                 snprintf(join_msg, sizeof(join_msg), "加入了房间");
                 init_room_action(room, userId, nickname, avatar_url, 0, join_msg);
-                // 广播操作日志给所有人
-                const char *actions_json = get_room_actions_json(room, 1);
-                if (actions_json)
-                {
-                    broadcast_response_room(room, actions_json);
-                    free((void *)actions_json);
-                }
             }
-            // 广播新的客户端信息
+            // 合并操作日志和用户列表广播，避免覆盖
             {
-                const char *client_list = get_client_list_json(room, BROADCAST_CLIENT_LIST);
-                broadcast_response_room(room, client_list);
-                free((void *)client_list);
+                const char *client_list_json = get_client_list_json(room, BROADCAST_CLIENT_LIST);
+                const char *actions_json = get_room_actions_json(room, 1);
+                char *combined = combine_json_with_actions(client_list_json, actions_json);
+                broadcast_response_room(room, combined ? combined : client_list_json);
+                free(combined);
+                free((void *)actions_json);
+                free((void *)client_list_json);
             }
             // 向新客户端同步房间当前状态
             {
@@ -441,11 +438,15 @@ static int client_callback_established(struct lws *wsi)
         snprintf(join_msg, sizeof(join_msg), "创建了房间");
         init_room_action(new_room, userId, nickname, avatar_url, 0, join_msg);
     }
-    // 广播新的客户端信息（新房间也需要广播）
+    // 合并操作日志和客户端信息广播
     {
-        const char *client_list = get_client_list_json(new_room, BROADCAST_CLIENT_LIST);
-        broadcast_response_room(new_room, client_list);
-        free((void *)client_list);
+        const char *client_list_json = get_client_list_json(new_room, BROADCAST_CLIENT_LIST);
+        const char *actions_json = get_room_actions_json(new_room, 1);
+        char *combined = combine_json_with_actions(client_list_json, actions_json);
+        broadcast_response_room(new_room, combined ? combined : client_list_json);
+        free(combined);
+        free((void *)actions_json);
+        free((void *)client_list_json);
     }
     return 0;
 }
