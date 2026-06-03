@@ -392,6 +392,22 @@ static void extract_song_fields(cJSON *song, char *singer_name, int singer_len,
             strncpy(cover_url, asc->valuestring, cover_len - 1);
     }
 
+    // 替换 {size} 占位符为实际尺寸
+    if (strlen(cover_url) > 0)
+    {
+        char *pos = strstr(cover_url, "{size}");
+        if (pos)
+        {
+            char tmp[512] = "";
+            int prefix_len = pos - cover_url;
+            strncpy(tmp, cover_url, prefix_len);
+            strcat(tmp, "400");
+            strcat(tmp, pos + 6); // skip "{size}"
+            strncpy(cover_url, tmp, cover_len - 1);
+            cover_url[cover_len - 1] = '\0';
+        }
+    }
+
     // 时长：time_length（秒）或 timelength（毫秒）
     *is_ms_duration = 0;
     cJSON *tl = cJSON_GetObjectItem(song, "time_length");
