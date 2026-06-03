@@ -1,11 +1,12 @@
 #include <stdlib.h>
+#include <time.h>
 #include <libwebsockets.h>
 #include "cJSON.h"
 #include "playlist.h"
 #include "websocket_service.h"
 #include "rooms.h"
 
-#define SERVICE_BASE_URL "https://xjt-togethertracks.top/api"
+#define SERVICE_BASE_URL "http://127.0.0.1:3000"
 
 extern struct lws_context *context;
 
@@ -86,7 +87,8 @@ struct ResponseData *http_request(const char *url,
     // 其他选项
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "MyCurlClient/1.0");
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
 
     // 执行请求
     res = curl_easy_perform(curl);
@@ -158,13 +160,15 @@ char *get_song_url(const char *song_hash)
 // 获取该房间所有的客户端信息
 const char *get_client_list_json(rooms_t *room, enum ctrl cmd)
 {
+    if (!room)
+        return NULL;
     cJSON *root = cJSON_CreateObject();
     cJSON *client_list = cJSON_CreateArray();
-    client_info_t *client = room->client_info->next;
-    if (!room || !root)
+    if (!root)
         return NULL;
 
     pthread_mutex_lock(&room->lock);
+    client_info_t *client = room->client_info->next;
     while (client)
     {
         cJSON *client_info = cJSON_CreateObject();
@@ -223,6 +227,7 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     strncpy(new_song->cover_url, cover_url, sizeof(new_song->cover_url) - 1);
     strncpy(new_song->added_by_nickname, client->nickname, sizeof(new_song->added_by_nickname) - 1);
     strncpy(new_song->added_by_avatar, client->avatar_url, sizeof(new_song->added_by_avatar) - 1);
+    new_song->is_system = 0;
     new_song->next = NULL;
 
     // 插入到播放列表末尾
@@ -246,6 +251,311 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     snprintf(message, sizeof(message), "添加歌曲：%s", song_name);
     init_room_action(room, client->userId, client->nickname, client->avatar_url, ADD_SONG_TO_PLAYLIST, message);
     return 0;
+}
+
+// 系统推荐歌曲插入（无需 client_info_t）
+int insert_system_song(rooms_t *room, const char *song_name, const char *song_hash,
+                       const char *singer_name, const char *album_name,
+                       const char *duration, const char *cover_url)
+{
+    if (!room || !song_name || !song_hash)
+        return -1;
+
+    playlist_t *new_song = (playlist_t *)malloc(sizeof(playlist_t));
+    if (!new_song)
+        return -1;
+    memset(new_song, 0, sizeof(playlist_t));
+    strncpy(new_song->song_name, song_name, sizeof(new_song->song_name) - 1);
+    strncpy(new_song->song_hash, song_hash, sizeof(new_song->song_hash) - 1);
+    strncpy(new_song->singer_name, singer_name, sizeof(new_song->singer_name) - 1);
+    strncpy(new_song->album_name, album_name, sizeof(new_song->album_name) - 1);
+    strncpy(new_song->duration, duration, sizeof(new_song->duration) - 1);
+    strncpy(new_song->cover_url, cover_url, sizeof(new_song->cover_url) - 1);
+    strncpy(new_song->added_by_nickname, "系统推荐", sizeof(new_song->added_by_nickname) - 1);
+    new_song->is_system = 1;
+    new_song->next = NULL;
+
+    pthread_mutex_lock(&room->lock);
+    room->playlist_tail->next = new_song;
+    room->playlist_tail = new_song;
+
+    // 如果是第一首歌曲，更新当前播放
+    if (room->current_song == NULL)
+    {
+        room->current_song = new_song;
+        pthread_mutex_unlock(&room->lock);
+        update_playing_info(room);
+    }
+    else
+    {
+        pthread_mutex_unlock(&room->lock);
+    }
+
+    // 记录推荐 hash 用于去重
+    int slot = room->recommended_count % 50;
+    strncpy(room->recommended_hashes[slot], song_hash, sizeof(room->recommended_hashes[slot]) - 1);
+    room->recommended_count++;
+
+    char message[128] = {0};
+    snprintf(message, sizeof(message), "系统推荐了歌曲：%s", song_name);
+    init_room_action(room, "system", "系统", "", BROADCAST_ROOM_ACTION, message);
+
+    return 0;
+}
+
+// 检查 hash 是否已推荐过
+static int is_hash_recommended(rooms_t *room, const char *hash)
+{
+    int count = room->recommended_count < 50 ? room->recommended_count : 50;
+    for (int i = 0; i < count; i++)
+    {
+        if (strcmp(room->recommended_hashes[i], hash) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+// 检查 hash 是否已在播放列表中
+static int is_hash_in_playlist(rooms_t *room, const char *hash)
+{
+    for (playlist_t *cur = room->playlist_head->next; cur; cur = cur->next)
+    {
+        if (strcmp(cur->song_hash, hash) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+// 推荐源类型
+enum recommend_source
+{
+    SRC_TOP_SONG = 0,
+    SRC_EVERYDAY_STYLE,
+    SRC_EVERYDAY_REC,
+    SRC_AI_REC,
+    SRC_PERSONAL_FM,
+    SRC_COUNT
+};
+
+static const char *source_names[] = {"top_song", "everyday_style", "everyday_rec", "ai_rec", "personal_fm"};
+
+// 从 cJSON 歌曲对象提取通用字段
+static void extract_song_fields(cJSON *song, char *singer_name, int singer_len,
+                                char *album_name, int album_len,
+                                char *cover_url, int cover_len,
+                                char *duration_str, int dur_len,
+                                int *is_ms_duration)
+{
+    // 歌手名：优先 author_name，其次 authors[].author_name
+    cJSON *author = cJSON_GetObjectItem(song, "author_name");
+    if (cJSON_IsString(author) && strlen(author->valuestring) > 0)
+    {
+        strncpy(singer_name, author->valuestring, singer_len - 1);
+    }
+    else
+    {
+        cJSON *authors = cJSON_GetObjectItem(song, "authors");
+        if (cJSON_IsArray(authors) && cJSON_GetArraySize(authors) > 0)
+        {
+            cJSON *first = cJSON_GetArrayItem(authors, 0);
+            cJSON *name = cJSON_GetObjectItem(first, "author_name");
+            if (cJSON_IsString(name))
+                strncpy(singer_name, name->valuestring, singer_len - 1);
+        }
+    }
+
+    // 专辑名
+    cJSON *album = cJSON_GetObjectItem(song, "album_name");
+    if (cJSON_IsString(album))
+        strncpy(album_name, album->valuestring, album_len - 1);
+
+    // 封面：sizable_cover > trans_param.union_cover > album_sizable_cover
+    cJSON *sizable = cJSON_GetObjectItem(song, "sizable_cover");
+    if (cJSON_IsString(sizable) && strlen(sizable->valuestring) > 0)
+    {
+        strncpy(cover_url, sizable->valuestring, cover_len - 1);
+    }
+    else
+    {
+        cJSON *tp = cJSON_GetObjectItem(song, "trans_param");
+        if (tp)
+        {
+            cJSON *uc = cJSON_GetObjectItem(tp, "union_cover");
+            if (cJSON_IsString(uc) && strlen(uc->valuestring) > 0)
+                strncpy(cover_url, uc->valuestring, cover_len - 1);
+        }
+    }
+    if (strlen(cover_url) == 0)
+    {
+        cJSON *asc = cJSON_GetObjectItem(song, "album_sizable_cover");
+        if (cJSON_IsString(asc))
+            strncpy(cover_url, asc->valuestring, cover_len - 1);
+    }
+
+    // 时长：time_length（秒）或 timelength（毫秒）
+    *is_ms_duration = 0;
+    cJSON *tl = cJSON_GetObjectItem(song, "time_length");
+    if (tl && tl->valueint > 0)
+    {
+        int total_sec = tl->valueint;
+        snprintf(duration_str, dur_len, "%02d:%02d", total_sec / 60, total_sec % 60);
+    }
+    else
+    {
+        cJSON *tms = cJSON_GetObjectItem(song, "timelength");
+        if (tms && tms->valueint > 0)
+        {
+            *is_ms_duration = 1;
+            int total_sec = tms->valueint / 1000;
+            snprintf(duration_str, dur_len, "%02d:%02d", total_sec / 60, total_sec % 60);
+        }
+    }
+}
+
+// 从指定推荐源获取歌曲列表 JSON 数组
+static cJSON *fetch_source_songs(enum recommend_source src, cJSON **root_out)
+{
+    char url[512] = {0};
+    const char *method = "GET";
+    const char *post_data = NULL;
+
+    switch (src)
+    {
+    case SRC_TOP_SONG:
+        snprintf(url, sizeof(url), "%s/top/song?page=1&pagesize=30", SERVICE_BASE_URL);
+        method = "POST";
+        post_data = "{}";
+        break;
+    case SRC_EVERYDAY_STYLE:
+        snprintf(url, sizeof(url), "%s/everyday/style/recommend", SERVICE_BASE_URL);
+        break;
+    case SRC_EVERYDAY_REC:
+        snprintf(url, sizeof(url), "%s/everyday/recommend", SERVICE_BASE_URL);
+        break;
+    case SRC_AI_REC:
+        snprintf(url, sizeof(url), "%s/ai/recommend", SERVICE_BASE_URL);
+        break;
+    case SRC_PERSONAL_FM:
+        snprintf(url, sizeof(url), "%s/personal/fm", SERVICE_BASE_URL);
+        break;
+    default:
+        return NULL;
+    }
+
+    struct ResponseData *response = http_request(url, method, post_data, NULL);
+    if (!response || !response->data || response->size == 0)
+    {
+        lwsl_err("auto_recommend: source=%s HTTP请求失败\n", source_names[src]);
+        if (response)
+        {
+            free(response->data);
+            free(response);
+        }
+        return NULL;
+    }
+
+    cJSON *root = cJSON_Parse(response->data);
+    free(response->data);
+    free(response);
+    if (!root)
+    {
+        lwsl_err("auto_recommend: source=%s JSON解析失败\n", source_names[src]);
+        return NULL;
+    }
+    *root_out = root;
+
+    cJSON *data = cJSON_GetObjectItem(root, "data");
+    if (!data)
+        return NULL;
+
+    // data 可能是数组（top/song）或对象含 song_list
+    if (cJSON_IsArray(data))
+        return data;
+
+    cJSON *song_list = cJSON_GetObjectItem(data, "song_list");
+    if (cJSON_IsArray(song_list))
+        return song_list;
+
+    return NULL;
+}
+
+// 从API获取推荐歌曲并添加到播放列表（多源混用，每次随机选一个源）
+int auto_recommend_song(rooms_t *room)
+{
+    if (!room)
+        return -1;
+
+    // 随机选一个源（单次请求，避免阻塞太久）
+    enum recommend_source src = rand() % SRC_COUNT;
+    cJSON *root = NULL;
+    cJSON *songs = fetch_source_songs(src, &root);
+
+    if (!songs || cJSON_GetArraySize(songs) == 0)
+    {
+        lwsl_notice("auto_recommend: source=%s 无歌曲\n", source_names[src]);
+        if (root)
+            cJSON_Delete(root);
+        return -1;
+    }
+
+    int total = cJSON_GetArraySize(songs);
+    int candidates[64];
+    int candidate_count = 0;
+
+    for (int i = 0; i < total && i < 64; i++)
+    {
+        cJSON *item = cJSON_GetArrayItem(songs, i);
+        cJSON *hash_obj = cJSON_GetObjectItem(item, "hash");
+        if (!cJSON_IsString(hash_obj))
+            continue;
+        if (!is_hash_recommended(room, hash_obj->valuestring) &&
+            !is_hash_in_playlist(room, hash_obj->valuestring))
+        {
+            candidates[candidate_count++] = i;
+        }
+    }
+
+    if (candidate_count == 0)
+    {
+        for (int i = 0; i < total && i < 64; i++)
+        {
+            cJSON *item = cJSON_GetArrayItem(songs, i);
+            cJSON *hash_obj = cJSON_GetObjectItem(item, "hash");
+            if (!cJSON_IsString(hash_obj))
+                continue;
+            if (!is_hash_in_playlist(room, hash_obj->valuestring))
+                candidates[candidate_count++] = i;
+        }
+    }
+
+    if (candidate_count == 0)
+    {
+        cJSON_Delete(root);
+        lwsl_notice("auto_recommend: source=%s 无可选歌曲\n", source_names[src]);
+        return -1;
+    }
+
+    int chosen = candidates[rand() % candidate_count];
+    cJSON *song = cJSON_GetArrayItem(songs, chosen);
+
+    const char *songname = cJSON_GetObjectItem(song, "songname") ? cJSON_GetObjectItem(song, "songname")->valuestring : "未知";
+    const char *hash = cJSON_GetObjectItem(song, "hash") ? cJSON_GetObjectItem(song, "hash")->valuestring : "";
+
+    char singer_name[128] = "未知歌手";
+    char album_name[128] = "";
+    char cover_url[512] = "";
+    char duration_str[16] = "00:00";
+    int is_ms = 0;
+    extract_song_fields(song, singer_name, sizeof(singer_name),
+                       album_name, sizeof(album_name),
+                       cover_url, sizeof(cover_url),
+                       duration_str, sizeof(duration_str), &is_ms);
+
+    lwsl_notice("auto_recommend: source=%s 推荐: %s - %s\n", source_names[src], songname, singer_name);
+
+    int result = insert_system_song(room, songname, hash, singer_name, album_name, duration_str, cover_url);
+    cJSON_Delete(root);
+    return result;
 }
 
 int remove_song_from_playlist(client_info_t *client, const char *song_hash)
@@ -315,6 +625,9 @@ int update_playing_info(rooms_t *room)
     playlist_t *curr = room->current_song;
     playing_info_t *playing_info = &room->playing_info;
 
+    // 先在锁外做HTTP请求（避免持锁阻塞整个服务器）
+    char *song_url = get_song_url(curr->song_hash);
+
     pthread_mutex_lock(&playing_info->lock);
 
     strncpy(playing_info->song_name, curr->song_name, sizeof(playing_info->song_name) - 1);
@@ -323,10 +636,11 @@ int update_playing_info(rooms_t *room)
     strncpy(playing_info->album_name, curr->album_name, sizeof(playing_info->album_name) - 1);
     strncpy(playing_info->duration, curr->duration, sizeof(playing_info->duration) - 1);
     strncpy(playing_info->cover_url, curr->cover_url, sizeof(playing_info->cover_url) - 1);
-    // 获取歌曲 url 填充进去
-    char *song_url = get_song_url(curr->song_hash);
-    strncpy(playing_info->song_url, song_url, sizeof(playing_info->song_url) - 1);
-    free(song_url);
+    if (song_url)
+    {
+        strncpy(playing_info->song_url, song_url, sizeof(playing_info->song_url) - 1);
+        free(song_url);
+    }
     playing_info->played_percent = 0; // 重置播放进度
     playing_info->is_playing = 1;     // 设置为正在播放
     playing_info->start_time = time(NULL);
@@ -340,14 +654,72 @@ int update_playing_info(rooms_t *room)
 // 系统播放下一首
 int play_next_song_bysystem(rooms_t *room)
 {
-    if (!room || !room->current_song)
+    if (!room)
         return -1;
-    pthread_mutex_lock(&room->lock);
-    room->current_song = room->current_song->next;
     if (!room->current_song)
     {
-        // 播放列表结束，重置为头节点
-        room->current_song = room->playlist_head->next;
+        // 没有当前歌曲，尝试推荐
+        auto_recommend_song(room);
+        return 0;
+    }
+
+    // 如果当前歌曲是系统推荐的，播完后移除
+    playlist_t *finished = room->current_song;
+    int was_system = finished->is_system;
+
+    pthread_mutex_lock(&room->lock);
+
+    if (was_system)
+    {
+        // 保存 next 指针，在 free 之前
+        playlist_t *next_after_finished = finished->next;
+
+        // 从链表中移除已播完的系统歌曲
+        playlist_t *prev = room->playlist_head;
+        while (prev && prev->next != finished)
+            prev = prev->next;
+        if (prev)
+        {
+            prev->next = next_after_finished;
+            if (room->playlist_tail == finished)
+                room->playlist_tail = prev;
+        }
+        free(finished);
+
+        // 寻找下一个用户添加的歌曲
+        playlist_t *next_song = next_after_finished;
+        while (next_song)
+        {
+            if (!next_song->is_system)
+            {
+                room->current_song = next_song;
+                pthread_mutex_unlock(&room->lock);
+                update_playing_info(room);
+                return 0;
+            }
+            next_song = next_song->next;
+        }
+
+        // 没有用户歌曲，解锁后推荐
+        room->current_song = NULL;
+        pthread_mutex_unlock(&room->lock);
+        auto_recommend_song(room);
+        return 0;
+    }
+
+    // 用户歌曲播完后，找下一首用户歌曲（不循环）
+    room->current_song = room->current_song->next;
+    while (room->current_song && room->current_song->is_system)
+    {
+        room->current_song = room->current_song->next;
+    }
+    if (!room->current_song)
+    {
+        // 没有更多用户歌曲，推荐
+        room->current_song = NULL;
+        pthread_mutex_unlock(&room->lock);
+        auto_recommend_song(room);
+        return 0;
     }
     pthread_mutex_unlock(&room->lock);
     update_playing_info(room);
@@ -586,12 +958,14 @@ int resume_song(client_info_t *client)
 // 获取当前房间播放列表
 const char *get_playlist_json(rooms_t *room, enum ctrl cmd)
 {
-    playlist_t *curr = room->playlist_head->next;
+    if (!room)
+        return NULL;
     cJSON *root = cJSON_CreateObject();
     if (!root)
         return NULL;
     // 创建一个json数组对象
     cJSON *playlist = cJSON_CreateArray();
+    playlist_t *curr = room->playlist_head->next;
     pthread_mutex_lock(&room->lock);
     while (curr)
     {
@@ -621,12 +995,14 @@ const char *get_playlist_json(rooms_t *room, enum ctrl cmd)
 // 获取播放列表和当前歌曲信息的合并JSON（用于添加歌曲后的广播）
 const char *get_playlist_and_song_info_json(rooms_t *room)
 {
-    playlist_t *curr = room->playlist_head->next;
+    if (!room)
+        return NULL;
     cJSON *root = cJSON_CreateObject();
     if (!root)
         return NULL;
 
     cJSON *playlist = cJSON_CreateArray();
+    playlist_t *curr = room->playlist_head->next;
     pthread_mutex_lock(&room->lock);
     while (curr)
     {

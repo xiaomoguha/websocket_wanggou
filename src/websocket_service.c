@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "types.h"
 #include <stdbool.h>
 #include "playlist.h"
@@ -168,6 +169,7 @@ static void operation_response(client_info_t *client, const char *msg)
 
     pthread_mutex_lock(&client->room->lock);
     strncpy(client->room->latest_msg, msg, sizeof(client->room->latest_msg) - 1);
+    client->room->broadcast_version++;
     pthread_mutex_unlock(&client->room->lock);
 
     // 遍历该房间客户端链表，唤醒对应客户端发送信息（除创建者）
@@ -276,10 +278,14 @@ void timer_callback(lws_sorted_usec_list_t *sul)
     {
         if (song_changed)
         {
-            // 切歌（包括循环），广播完整歌曲信息
-            const char *song_info_json = get_cur_song_info(playing_info->room, BROADCAST_SONG_INFO);
-            broadcast_response_room(playing_info->room, song_info_json);
-            free((void *)song_info_json);
+            // 切歌，广播歌曲信息 + 播放列表（系统推荐会改变列表）
+            const char *combined = get_playlist_and_song_info_json(playing_info->room);
+            const char *actions_json = get_room_actions_json(playing_info->room, 1);
+            char *final = combine_json_with_actions(combined, actions_json);
+            broadcast_response_room(playing_info->room, final ? final : combined);
+            free(final);
+            free((void *)combined);
+            free((void *)actions_json);
         }
         else
         {
@@ -367,6 +373,11 @@ static int client_callback_established(struct lws *wsi)
             }
             lws_set_opaque_user_data(wsi, new_client);
             lwsl_notice("客户端加入房间: %s\n", roomid);
+            // 如果房间没有歌曲，自动推荐一首
+            if (!room->current_song && !room->playlist_head->next)
+            {
+                auto_recommend_song(room);
+            }
             // 打印房间信息以及客户端信息
             for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
             {
@@ -421,6 +432,8 @@ static int client_callback_established(struct lws *wsi)
     }
     lwsl_notice("创建房间成功，启动定时器\n");
     lws_sul_schedule(context, 0, &new_room->playing_info.timer, timer_callback, LWS_US_PER_SEC * 5);
+    // 自动推荐第一首歌
+    auto_recommend_song(new_room);
     if (!(new_client = insert_client_info(wsi, client_ip, new_room, userId, nickname, avatar_url)))
     {
         lwsl_err("Failed to insert client info\n");
@@ -448,6 +461,26 @@ static int client_callback_established(struct lws *wsi)
         free(combined);
         free((void *)actions_json);
         free((void *)client_list_json);
+    }
+    // 向创建者同步播放列表和歌曲信息
+    {
+        const char *playlist_json = get_playlist_json(new_room, GET_PLAYLIST);
+        send_message_to_client(new_client, playlist_json);
+        free((void *)playlist_json);
+    }
+    if (new_room->current_song)
+    {
+        const char *song_info = get_cur_song_info(new_room, BROADCAST_SONG_INFO);
+        send_message_to_client(new_client, song_info);
+        free((void *)song_info);
+    }
+    {
+        const char *actions_json = get_room_actions_json(new_room, 50);
+        if (actions_json)
+        {
+            send_message_to_client(new_client, actions_json);
+            free((void *)actions_json);
+        }
     }
     return 0;
 }
@@ -625,8 +658,11 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         const char *error_ptr = cJSON_GetErrorPtr();
         {
             char msg[128] = {0};
-            sprintf(msg, "JSON 解析错误:%s", error_ptr);
-            lwsl_err("JSON 解析错误: %s\n", error_ptr);
+            if (error_ptr)
+                snprintf(msg, sizeof(msg), "JSON 解析错误:%s", error_ptr);
+            else
+                snprintf(msg, sizeof(msg), "JSON 解析错误");
+            lwsl_err("JSON 解析错误: %s\n", error_ptr ? error_ptr : "unknown");
             error_response(client, msg);
         }
         return 0;
@@ -764,16 +800,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 char *final = combine_json_with_actions(combined_json, actions_json);
                 const char *broadcast_msg = final ? final : combined_json;
 
-                pthread_mutex_lock(&client->room->lock);
-                strncpy(client->room->latest_msg, broadcast_msg, sizeof(client->room->latest_msg) - 1);
-                pthread_mutex_unlock(&client->room->lock);
-                for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
-                {
-                    if (cur->wsi && client != cur)
-                    {
-                        lws_callback_on_writable(cur->wsi);
-                    }
-                }
+                broadcast_response_room(client->room, broadcast_msg);
                 free(final);
                 free((void *)combined_json);
                 free((void *)actions_json);
@@ -791,7 +818,8 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case REMOVE_SONG_FROM_PLAYLIST:
         if (cJSON_IsObject(params))
         {
-            if (remove_song_from_playlist(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
+            cJSON *rm_hash = cJSON_GetObjectItem(params, "songhash");
+            if (cJSON_IsString(rm_hash) && remove_song_from_playlist(client, rm_hash->valuestring) >= 0)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 const char *actions_json = get_room_actions_json(client->room, 1);
@@ -814,7 +842,8 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case UP_SONGBYHASH:
         if (cJSON_IsObject(params))
         {
-            if (upsongbyhash(client, cJSON_GetObjectItem(params, "songhash")->valuestring) >= 0)
+            cJSON *up_hash = cJSON_GetObjectItem(params, "songhash");
+            if (cJSON_IsString(up_hash) && upsongbyhash(client, up_hash->valuestring) >= 0)
             {
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 const char *actions_json = get_room_actions_json(client->room, 1);
@@ -1108,6 +1137,7 @@ int main(int argc, const char **argv)
     }
 
     curl_global_init(CURL_GLOBAL_ALL);
+    srand((unsigned int)time(NULL));
 
     g_rooms_list = init_rooms();
     if (!g_rooms_list)

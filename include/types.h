@@ -14,6 +14,7 @@ typedef struct playlist
     char cover_url[512];
     char added_by_nickname[128];
     char added_by_avatar[512];
+    char is_system; // 0=用户添加, 1=系统推荐
     struct playlist *next;
 } playlist_t;
 // 正在播放的歌曲信息
@@ -78,6 +79,10 @@ typedef struct rooms
     playlist_t *current_song;
     room_ctrl_t *room_ctrl_head;
     playing_info_t playing_info;
+    // 系统推荐去重
+    char recommended_hashes[50][128];
+    int recommended_count;
+    int recommend_page;
     struct rooms *next;
 } rooms_t;
 // 操作枚举

@@ -124,6 +124,9 @@ rooms_t *insert_room_info(const char *room_id, const char *creater_id, rooms_t *
     if (!insert_room_node(head, new_node))
     {
         lwsl_err("Failed to insert room node\n");
+        free(new_node->playlist_head);
+        free(new_node->client_info);
+        free(new_node->room_ctrl_head);
         free(new_node);
         return NULL;
     }
@@ -145,6 +148,20 @@ void remove_room_node(rooms_t *head, rooms_t *node)
     node->playlist_head = NULL;
     // 释放房间操作链表
     free_room_action(node);
+
+    // 释放客户端链表
+    client_info_t *ccur = node->client_info;
+    while (ccur != NULL)
+    {
+        client_info_t *cnext = ccur->next;
+        pthread_mutex_destroy(&ccur->lock);
+        free(ccur);
+        ccur = cnext;
+    }
+
+    // 销毁互斥锁
+    pthread_mutex_destroy(&node->lock);
+    pthread_mutex_destroy(&node->playing_info.lock);
 
     // 再删除节点
     rooms_t *foreach_cur = head->next;
