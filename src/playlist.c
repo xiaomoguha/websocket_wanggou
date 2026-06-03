@@ -674,71 +674,39 @@ int play_next_song_bysystem(rooms_t *room)
         return -1;
     if (!room->current_song)
     {
-        // 没有当前歌曲，尝试推荐
         auto_recommend_song(room);
         return 0;
     }
 
-    // 如果当前歌曲是系统推荐的，播完后移除
     playlist_t *finished = room->current_song;
-    int was_system = finished->is_system;
 
     pthread_mutex_lock(&room->lock);
 
-    if (was_system)
+    // 播完后移除
+    playlist_t *next_after = finished->next;
+    playlist_t *prev = room->playlist_head;
+    while (prev && prev->next != finished)
+        prev = prev->next;
+    if (prev)
     {
-        // 保存 next 指针，在 free 之前
-        playlist_t *next_after_finished = finished->next;
+        prev->next = next_after;
+        if (room->playlist_tail == finished)
+            room->playlist_tail = prev;
+    }
+    free(finished);
 
-        // 从链表中移除已播完的系统歌曲
-        playlist_t *prev = room->playlist_head;
-        while (prev && prev->next != finished)
-            prev = prev->next;
-        if (prev)
-        {
-            prev->next = next_after_finished;
-            if (room->playlist_tail == finished)
-                room->playlist_tail = prev;
-        }
-        free(finished);
-
-        // 寻找下一个用户添加的歌曲
-        playlist_t *next_song = next_after_finished;
-        while (next_song)
-        {
-            if (!next_song->is_system)
-            {
-                room->current_song = next_song;
-                pthread_mutex_unlock(&room->lock);
-                update_playing_info(room);
-                return 0;
-            }
-            next_song = next_song->next;
-        }
-
-        // 没有用户歌曲，解锁后推荐
-        room->current_song = NULL;
+    // 有下一首就播，没有就推荐
+    if (next_after)
+    {
+        room->current_song = next_after;
         pthread_mutex_unlock(&room->lock);
-        auto_recommend_song(room);
+        update_playing_info(room);
         return 0;
     }
 
-    // 用户歌曲播完后，找下一首用户歌曲（不循环）
-    room->current_song = room->current_song->next;
-    while (room->current_song && room->current_song->is_system)
-    {
-        room->current_song = room->current_song->next;
-    }
-    if (!room->current_song)
-    {
-        // 没有更多用户歌曲，推荐
-        room->current_song = NULL;
-        pthread_mutex_unlock(&room->lock);
-        auto_recommend_song(room);
-        return 0;
-    }
+    room->current_song = NULL;
     pthread_mutex_unlock(&room->lock);
-    update_playing_info(room);
+    auto_recommend_song(room);
     return 0;
 }
 
@@ -752,19 +720,39 @@ int play_next_song(client_info_t *client)
     {
         return -1;
     }
-    pthread_mutex_lock(&room->lock);
-    room->current_song = room->current_song->next;
-    if (!room->current_song)
-    {
-        // 播放列表结束，重置为头节点
-        room->current_song = room->playlist_head->next;
-    }
-    char message[1024] = {0};
-    snprintf(message, sizeof(message), "播放了下一首:%s", room->current_song->song_name);
-    init_room_action(room, client->userId, client->nickname, client->avatar_url, PLAY_BY_SONG_HASH, message);
-    pthread_mutex_unlock(&room->lock);
-    update_playing_info(room);
 
+    playlist_t *finished = room->current_song;
+
+    pthread_mutex_lock(&room->lock);
+
+    // 播完后移除
+    playlist_t *next_after = finished->next;
+    playlist_t *prev = room->playlist_head;
+    while (prev && prev->next != finished)
+        prev = prev->next;
+    if (prev)
+    {
+        prev->next = next_after;
+        if (room->playlist_tail == finished)
+            room->playlist_tail = prev;
+    }
+    free(finished);
+
+    // 有下一首就播，没有就推荐
+    if (next_after)
+    {
+        room->current_song = next_after;
+        char message[1024] = {0};
+        snprintf(message, sizeof(message), "播放了下一首:%s", room->current_song->song_name);
+        init_room_action(room, client->userId, client->nickname, client->avatar_url, PLAY_BY_SONG_HASH, message);
+        pthread_mutex_unlock(&room->lock);
+        update_playing_info(room);
+        return 0;
+    }
+
+    room->current_song = NULL;
+    pthread_mutex_unlock(&room->lock);
+    auto_recommend_song(room);
     return 0;
 }
 int playbysonghash(client_info_t *client, const char *song_hash)

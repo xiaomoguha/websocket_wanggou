@@ -701,14 +701,24 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case PLAY_NEXT_SONG:
         if (play_next_song(client) >= 0)
         {
-            const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
+            const char *combined_json = get_playlist_and_song_info_json(client->room);
             const char *actions_json = get_room_actions_json(client->room, 1);
-            char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
-            operation_response(client, combined ? combined : cur_song_info_json);
-            // 操作者也需要收到操作日志
-            if (actions_json) { send_message_to_client(client, actions_json); }
-            free(combined);
-            free((void *)cur_song_info_json);
+            // 操作者收到 playlist + 操作日志
+            const char *operator_actions = get_room_actions_json(client->room, 1);
+            {
+                char *op_combined = combine_json_with_actions(combined_json, operator_actions);
+                send_message_to_client(client, op_combined ? op_combined : combined_json);
+                free(op_combined);
+            }
+            free((void *)operator_actions);
+            // 其他客户端
+            {
+                char *final = combine_json_with_actions(combined_json, actions_json);
+                const char *broadcast_msg = final ? final : combined_json;
+                broadcast_response_room(client->room, broadcast_msg);
+                free(final);
+            }
+            free((void *)combined_json);
             free((void *)actions_json);
         }
         else
