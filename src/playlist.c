@@ -297,7 +297,7 @@ int insert_system_song(rooms_t *room, const char *song_name, const char *song_ha
     room->recommended_count++;
 
     char message[128] = {0};
-    snprintf(message, sizeof(message), "系统推荐了歌曲：%s", song_name);
+    snprintf(message, sizeof(message), "推荐了歌曲：%s", song_name);
     init_room_action(room, "system", "系统", "", BROADCAST_ROOM_ACTION, message);
 
     return 0;
