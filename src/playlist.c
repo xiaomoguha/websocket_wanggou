@@ -1083,6 +1083,7 @@ const char *get_room_actions_json(rooms_t *room, int max_count)
         cJSON_AddNumberToObject(item, "action", cur->action);
         cJSON_AddStringToObject(item, "message", cur->action_message);
         cJSON_AddNumberToObject(item, "time", (double)cur->action_time);
+        cJSON_AddStringToObject(item, "msg_type", cur->action == SEND_CHAT ? "chat" : "action");
         cJSON_AddItemToArray(actions, item);
     }
     pthread_mutex_unlock(&room->lock);

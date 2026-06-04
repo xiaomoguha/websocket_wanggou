@@ -873,7 +873,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case SEND_CHAT:
         {
             cJSON *msg_item = params ? cJSON_GetObjectItem(params, "message") : NULL;
-            if (cJSON_IsString(msg_item) && strlen(msg_item->valuestring) > 0)
+            if (cJSON_IsString(msg_item) && strlen(msg_item->valuestring) > 0 && strlen(msg_item->valuestring) <= 500)
             {
                 cJSON *chat_root = cJSON_CreateObject();
                 cJSON *chat_data = cJSON_CreateObject();
@@ -889,10 +889,12 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 cJSON_Delete(chat_root);
                 broadcast_response_room(client->room, chat_json);
                 free(chat_json);
+                // 存入操作历史，供新加入用户查看
+                init_room_action(client->room, client->userId, client->nickname, client->avatar_url, SEND_CHAT, msg_item->valuestring);
             }
             else
             {
-                error_response(client, "消息不能为空");
+                error_response(client, strlen(msg_item->valuestring) > 500 ? "消息过长，最多500字" : "消息不能为空");
             }
         }
         break;
