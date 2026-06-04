@@ -1034,12 +1034,12 @@ int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 
             free(buf);
             free(json_str);
-            (void)lws_http_transaction_completed(wsi);
+            if (lws_http_transaction_completed(wsi)) return -1;
             return 0;
         }
 
         lws_return_http_status(wsi, 404, "Not Found");
-        (void)lws_http_transaction_completed(wsi);
+        if (lws_http_transaction_completed(wsi)) return -1;
         return 0;
     }
     // 过滤新连接请求

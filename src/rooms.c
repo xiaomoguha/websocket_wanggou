@@ -26,7 +26,7 @@ bool insert_room_action(rooms_t *room, room_ctrl_t *new_node)
 #define MAX_ROOM_ACTIONS 100
 
 // 新建操作节点并插入链表中
-bool init_room_action(rooms_t *room, char *userid, char *nickname, char *avatar_url, char action, char *action_message)
+bool init_room_action(rooms_t *room, char *userid, char *nickname, char *avatar_url, int action, char *action_message)
 {
     if (room == NULL || userid == NULL || action_message == NULL)
     {

@@ -59,7 +59,7 @@ typedef struct room_ctrl
     char userid[64];
     char nickname[128];
     char avatar_url[512];
-    char action;
+    int action;
     char action_message[512];
     time_t action_time;
     struct room_ctrl *next;
