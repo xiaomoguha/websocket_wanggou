@@ -22,6 +22,9 @@ bool insert_room_action(rooms_t *room, room_ctrl_t *new_node)
     head->next = new_node;
     return true;
 }
+
+#define MAX_ROOM_ACTIONS 100
+
 // 新建操作节点并插入链表中
 bool init_room_action(rooms_t *room, char *userid, char *nickname, char *avatar_url, char action, char *action_message)
 {
@@ -29,6 +32,34 @@ bool init_room_action(rooms_t *room, char *userid, char *nickname, char *avatar_
     {
         return false;
     }
+
+    // 统计当前数量，超过上限则移除最旧的
+    int count = 0;
+    room_ctrl_t *tail_prev = NULL;
+    room_ctrl_t *tail = NULL;
+    for (room_ctrl_t *cur = room->room_ctrl_head->next, *prev = room->room_ctrl_head;
+         cur != NULL; prev = cur, cur = cur->next)
+    {
+        count++;
+        tail_prev = prev;
+        tail = cur;
+    }
+    while (count >= MAX_ROOM_ACTIONS && tail_prev && tail)
+    {
+        tail_prev->next = NULL;
+        free(tail);
+        count--;
+        // 重新找尾部
+        tail = NULL;
+        tail_prev = NULL;
+        for (room_ctrl_t *cur = room->room_ctrl_head->next, *prev = room->room_ctrl_head;
+             cur != NULL; prev = cur, cur = cur->next)
+        {
+            tail_prev = prev;
+            tail = cur;
+        }
+    }
+
     room_ctrl_t *new_node = (room_ctrl_t *)malloc(sizeof(room_ctrl_t));
     memset(new_node, 0, sizeof(room_ctrl_t));
     strncpy(new_node->userid, userid, 63);
@@ -68,6 +99,7 @@ rooms_t *init_rooms()
     pthread_mutex_init(&room->lock, NULL);
     room->next = NULL;
     room->playlist_head = NULL;
+    room->latest_msg = strdup("");
     return room;
 }
 // 头插法插入房间节点
@@ -116,6 +148,7 @@ rooms_t *insert_room_info(const char *room_id, const char *creater_id, rooms_t *
     new_node->playlist_head->next = NULL;
     new_node->playlist_tail = new_node->playlist_head;      // 初始化尾节点指向头节点
     new_node->current_song = new_node->playlist_head->next; // 初始化当前播放歌曲指向头节点
+    new_node->latest_msg = strdup("");
     pthread_mutex_init(&new_node->lock, NULL);
     pthread_mutex_init(&new_node->playing_info.lock, NULL);
     new_node->playing_info.room = new_node;
@@ -127,6 +160,7 @@ rooms_t *insert_room_info(const char *room_id, const char *creater_id, rooms_t *
         free(new_node->playlist_head);
         free(new_node->client_info);
         free(new_node->room_ctrl_head);
+        free(new_node->latest_msg);
         free(new_node);
         return NULL;
     }
@@ -149,11 +183,13 @@ void remove_room_node(rooms_t *head, rooms_t *node)
     // 释放房间操作链表
     free_room_action(node);
 
-    // 释放客户端链表
+    // 释放客户端链表（含消息队列）
     client_info_t *ccur = node->client_info;
     while (ccur != NULL)
     {
         client_info_t *cnext = ccur->next;
+        for (int i = 0; i < CLIENT_MSG_QUEUE_SIZE; i++)
+            free(ccur->msg_queue[i]);
         pthread_mutex_destroy(&ccur->lock);
         free(ccur);
         ccur = cnext;
@@ -161,6 +197,7 @@ void remove_room_node(rooms_t *head, rooms_t *node)
 
     // 销毁互斥锁
     pthread_mutex_destroy(&node->lock);
+    free(node->latest_msg);
     pthread_mutex_destroy(&node->playing_info.lock);
 
     // 再删除节点

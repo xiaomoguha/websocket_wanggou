@@ -45,7 +45,7 @@ typedef struct client_info
     char userId[64];
     char nickname[128];
     char avatar_url[512];
-    char msg_queue[CLIENT_MSG_QUEUE_SIZE][4096];
+    char *msg_queue[CLIENT_MSG_QUEUE_SIZE]; // 动态分配的消息队列
     int msg_queue_head;
     int msg_queue_count;
     unsigned int last_broadcast_version;
@@ -71,7 +71,7 @@ typedef struct rooms
     char creater_id[64];
     unsigned int client_counter;
     client_info_t *client_info;
-    char latest_msg[4096];
+    char *latest_msg; // 动态分配的广播消息
     unsigned int broadcast_version;
     pthread_mutex_t lock;
     playlist_t *playlist_head;

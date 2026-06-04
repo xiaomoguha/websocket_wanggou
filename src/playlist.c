@@ -809,15 +809,26 @@ int upsongbyhash(client_info_t *client, const char *song_hash)
             char message[256] = {0};
             snprintf(message, sizeof(message), "将歌曲置顶：%s", curr->song_name);
             init_room_action(room, client->userId, client->nickname, client->avatar_url, UP_SONGBYHASH, message);
-            // 找到歌曲，进行置顶操作
+            // 找到歌曲，进行置顶操作（插入到当前播放歌曲后面，使其成为下一首）
             prev->next = curr->next;
             if (curr == room->playlist_tail)
             {
                 room->playlist_tail = prev;
             }
-            // 插入到头节点后面
-            curr->next = room->playlist_head->next;
-            room->playlist_head->next = curr;
+            if (room->current_song && room->current_song != curr)
+            {
+                // 插入到当前播放歌曲之后
+                curr->next = room->current_song->next;
+                room->current_song->next = curr;
+                if (room->current_song == room->playlist_tail)
+                    room->playlist_tail = curr;
+            }
+            else if (!room->current_song)
+            {
+                // 没有在播放的歌曲，插到最前面
+                curr->next = room->playlist_head->next;
+                room->playlist_head->next = curr;
+            }
             pthread_mutex_unlock(&room->lock);
             return 0;
         }

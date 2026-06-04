@@ -95,8 +95,8 @@ void submit_broadcast_message(struct lws *wsi, const char *msg)
         return;
     }
     pthread_mutex_lock(&client->room->lock);
-    strncpy(client->room->latest_msg, msg, sizeof(client->room->latest_msg) - 1);
-    client->room->latest_msg[sizeof(client->room->latest_msg) - 1] = '\0';
+    free(client->room->latest_msg);
+    client->room->latest_msg = strdup(msg);
     pthread_mutex_unlock(&client->room->lock);
 
     // 遍历该房间客户端链表，唤醒对应客户端发送信息
@@ -114,8 +114,8 @@ void submit_broadcast_message(struct lws *wsi, const char *msg)
 static void broadcast_response_room(rooms_t *room, const char *msg)
 {
     pthread_mutex_lock(&room->lock);
-    strncpy(room->latest_msg, msg, sizeof(room->latest_msg));
-    room->latest_msg[sizeof(room->latest_msg) - 1] = '\0';
+    free(room->latest_msg);
+    room->latest_msg = strdup(msg);
     room->broadcast_version++;
     pthread_mutex_unlock(&room->lock);
 
@@ -168,7 +168,8 @@ static void operation_response(client_info_t *client, const char *msg)
     success_response(client, "操作成功");
 
     pthread_mutex_lock(&client->room->lock);
-    strncpy(client->room->latest_msg, msg, sizeof(client->room->latest_msg) - 1);
+    free(client->room->latest_msg);
+    client->room->latest_msg = strdup(msg);
     client->room->broadcast_version++;
     pthread_mutex_unlock(&client->room->lock);
 
@@ -399,26 +400,15 @@ static int client_callback_established(struct lws *wsi)
                 free((void *)actions_json);
                 free((void *)client_list_json);
             }
-            // 向新客户端同步房间当前状态
+            // 向新客户端发送合并的初始同步（播放列表 + 歌曲信息 + 操作历史）
             {
-                const char *playlist_json = get_playlist_json(room, GET_PLAYLIST);
-                send_message_to_client(new_client, playlist_json);
-                free((void *)playlist_json);
-            }
-            // 发送操作历史给新客户端
-            {
-                const char *actions_json = get_room_actions_json(room, 50);
-                if (actions_json)
-                {
-                    send_message_to_client(new_client, actions_json);
-                    free((void *)actions_json);
-                }
-            }
-            if (room->current_song)
-            {
-                const char *song_info = get_cur_song_info(room, BROADCAST_SONG_INFO);
-                send_message_to_client(new_client, song_info);
-                free((void *)song_info);
+                const char *playlist_song = get_playlist_and_song_info_json(room);
+                const char *actions_json = get_room_actions_json(room, 100);
+                char *sync_msg = combine_json_with_actions(playlist_song, actions_json);
+                send_message_to_client(new_client, sync_msg ? sync_msg : playlist_song);
+                free(sync_msg);
+                free((void *)actions_json);
+                free((void *)playlist_song);
             }
             return 0;
         }
@@ -462,25 +452,15 @@ static int client_callback_established(struct lws *wsi)
         free((void *)actions_json);
         free((void *)client_list_json);
     }
-    // 向创建者同步播放列表和歌曲信息
+    // 向创建者发送合并的初始同步（播放列表 + 歌曲信息 + 操作历史）
     {
-        const char *playlist_json = get_playlist_json(new_room, GET_PLAYLIST);
-        send_message_to_client(new_client, playlist_json);
-        free((void *)playlist_json);
-    }
-    if (new_room->current_song)
-    {
-        const char *song_info = get_cur_song_info(new_room, BROADCAST_SONG_INFO);
-        send_message_to_client(new_client, song_info);
-        free((void *)song_info);
-    }
-    {
-        const char *actions_json = get_room_actions_json(new_room, 50);
-        if (actions_json)
-        {
-            send_message_to_client(new_client, actions_json);
-            free((void *)actions_json);
-        }
+        const char *playlist_song = get_playlist_and_song_info_json(new_room);
+        const char *actions_json = get_room_actions_json(new_room, 100);
+        char *sync_msg = combine_json_with_actions(playlist_song, actions_json);
+        send_message_to_client(new_client, sync_msg ? sync_msg : playlist_song);
+        free(sync_msg);
+        free((void *)actions_json);
+        free((void *)playlist_song);
     }
     return 0;
 }
@@ -529,6 +509,11 @@ static int client_callback_closed(struct lws *wsi)
         free((void *)actions_json);
         free((void *)client_list_json);
 
+        // 释放消息队列中剩余的消息
+        for (int i = 0; i < CLIENT_MSG_QUEUE_SIZE; i++)
+        {
+            free(client->msg_queue[i]);
+        }
         free(client);
         lwsl_notice("客户端信息已清理\n");
     }
@@ -601,7 +586,7 @@ static void success_response(client_info_t *client, const char *msg)
     send_message_to_client(client, json_str);
     free(json_str);
 }
-// 某客户端单独发送信息（入队）
+// 某客户端单独发送信息（入队，动态分配）
 static void send_message_to_client(client_info_t *client, const char *msg)
 {
     if (!client || !msg)
@@ -610,17 +595,15 @@ static void send_message_to_client(client_info_t *client, const char *msg)
     if (client->msg_queue_count < CLIENT_MSG_QUEUE_SIZE)
     {
         int slot = (client->msg_queue_head + client->msg_queue_count) % CLIENT_MSG_QUEUE_SIZE;
-        strncpy(client->msg_queue[slot], msg, sizeof(client->msg_queue[slot]) - 1);
-        client->msg_queue[slot][sizeof(client->msg_queue[slot]) - 1] = '\0';
+        client->msg_queue[slot] = strdup(msg);
         client->msg_queue_count++;
     }
     else
     {
         // 队列满，丢弃最旧的消息，推入新消息
+        free(client->msg_queue[client->msg_queue_head]);
+        client->msg_queue[client->msg_queue_head] = strdup(msg);
         client->msg_queue_head = (client->msg_queue_head + 1) % CLIENT_MSG_QUEUE_SIZE;
-        int slot = (client->msg_queue_head + client->msg_queue_count - 1) % CLIENT_MSG_QUEUE_SIZE;
-        strncpy(client->msg_queue[slot], msg, sizeof(client->msg_queue[slot]) - 1);
-        client->msg_queue[slot][sizeof(client->msg_queue[slot]) - 1] = '\0';
     }
     pthread_mutex_unlock(&client->lock);
     lws_callback_on_writable(client->wsi);
@@ -636,7 +619,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         return -1;
     }
     // 复制到本地缓冲区，避免修改 libwebsockets 的只读输入缓冲区
-    if (len >= sizeof(client->msg_queue[0]))
+    if (len >= 65536)
     {
         lwsl_err("消息过长，丢弃 (长度: %zu)\n", len);
         return 0;
@@ -923,7 +906,8 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
 
 static int client_callback_wirtable(struct lws *wsi)
 {
-    char local_msg[4096] = {0};
+    char *local_msg = NULL;
+
     client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
     if (!client)
     {
@@ -935,20 +919,27 @@ static int client_callback_wirtable(struct lws *wsi)
     pthread_mutex_lock(&client->lock);
     if (client->msg_queue_count > 0)
     {
-        strcpy(local_msg, client->msg_queue[client->msg_queue_head]);
+        local_msg = client->msg_queue[client->msg_queue_head];
+        client->msg_queue[client->msg_queue_head] = NULL;
         client->msg_queue_head = (client->msg_queue_head + 1) % CLIENT_MSG_QUEUE_SIZE;
         client->msg_queue_count--;
     }
     pthread_mutex_unlock(&client->lock);
 
-    if (strlen(local_msg))
+    if (local_msg)
     {
-        unsigned char client_msg[LWS_PRE + sizeof(local_msg)];
-        unsigned char *clnent_p = &client_msg[LWS_PRE];
-        size_t client_n = strlen(local_msg);
-        memcpy(clnent_p, local_msg, client_n);
-        lws_write(wsi, clnent_p, client_n, LWS_WRITE_TEXT);
+        size_t msg_len = strlen(local_msg);
+        unsigned char *client_msg = (unsigned char *)malloc(LWS_PRE + msg_len);
+        if (!client_msg)
+        {
+            free(local_msg);
+            return -1;
+        }
+        memcpy(&client_msg[LWS_PRE], local_msg, msg_len);
+        lws_write(wsi, &client_msg[LWS_PRE], msg_len, LWS_WRITE_TEXT);
         lwsl_notice("向%s发送消息: %s\n", client->ip, local_msg);
+        free(client_msg);
+        free(local_msg);
 
         // 队列还有消息，继续触发可写回调
         if (client->msg_queue_count > 0)
@@ -962,23 +953,28 @@ static int client_callback_wirtable(struct lws *wsi)
     pthread_mutex_lock(&client->room->lock);
     if (client->room->broadcast_version != client->last_broadcast_version)
     {
-        strcpy(local_msg, client->room->latest_msg);
+        local_msg = client->room->latest_msg ? strdup(client->room->latest_msg) : NULL;
         client->last_broadcast_version = client->room->broadcast_version;
     }
     pthread_mutex_unlock(&client->room->lock);
 
-    if (!strlen(local_msg))
+    if (!local_msg)
     {
         return 0;
     }
 
-    unsigned char buffer[LWS_PRE + sizeof(local_msg)];
-    unsigned char *p = &buffer[LWS_PRE];
-    size_t n = strlen(local_msg);
-
-    memcpy(p, local_msg, n);
-    lws_write(wsi, p, n, LWS_WRITE_TEXT);
+    size_t msg_len = strlen(local_msg);
+    unsigned char *buffer = (unsigned char *)malloc(LWS_PRE + msg_len);
+    if (!buffer)
+    {
+        free(local_msg);
+        return -1;
+    }
+    memcpy(&buffer[LWS_PRE], local_msg, msg_len);
+    lws_write(wsi, &buffer[LWS_PRE], msg_len, LWS_WRITE_TEXT);
     lwsl_notice("向%s发送广播消息: %s\n", client->ip, local_msg);
+    free(buffer);
+    free(local_msg);
     return 0;
 }
 
