@@ -26,12 +26,12 @@ rooms_t *g_rooms_list = NULL; // 房间链表
 // 定义协议处理结构
 static struct lws_protocols protocols[] = {
     {
-        "ctrl-protocol", // 协议名称
-        callback_echo,   // 回调函数
-        0,               // 每个连接的用户数据大小
-        4096,            // 接收缓冲区大小
+        .name = "ctrl-protocol", // 协议名称
+        .callback = callback_echo,   // 回调函数
+        .per_session_data_size = 0,  // 每个连接的用户数据大小
+        .rx_buffer_size = 4096,      // 接收缓冲区大小
     },
-    {NULL, NULL, 0, 0} // 协议列表结束标记
+    {0} // 协议列表结束标记
 };
 
 // 头插法插入客户端节点
@@ -169,6 +169,7 @@ static FILE *log_file = NULL;
 // 自定义日志输出函数（同时输出到 stderr 和日志文件）
 static void log_emit_function(int level, const char *line)
 {
+    (void)level;
     // 输出到 stderr
     fprintf(stderr, "%s", line);
 
@@ -947,6 +948,7 @@ static int client_callback_wirtable(struct lws *wsi)
 // WebSocket 回调函数，处理各种事件
 int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len)
 {
+    (void)user;
     int ret = 0;
     switch (reason)
     {

@@ -103,7 +103,7 @@ rooms_t *init_rooms()
         lwsl_err("Failed to allocate memory for rooms\n");
         return NULL;
     }
-    memset(room, 0, sizeof(room));
+    memset(room, 0, sizeof(*room));
     strcpy(room->room_id, "head");
     room->client_counter = 0;
     room->client_info = NULL;
