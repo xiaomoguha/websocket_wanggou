@@ -30,7 +30,6 @@ typedef struct playing_info
     char cover_url[512];
     double played_percent;
     char is_playing;
-    time_t start_time;
     time_t last_update_time;
     struct rooms *room;
     pthread_mutex_t lock;

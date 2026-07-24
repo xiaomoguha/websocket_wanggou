@@ -5,6 +5,7 @@
 #include "playlist.h"
 #include "websocket_service.h"
 #include "rooms.h"
+#include "utf8.h"
 
 #define SERVICE_BASE_URL "http://127.0.0.1:3000"
 
@@ -46,7 +47,14 @@ struct ResponseData *http_request(const char *url,
     struct ResponseData *response;
 
     response = malloc(sizeof(struct ResponseData));
+    if (!response)
+        return NULL;
     response->data = malloc(1);
+    if (!response->data)
+    {
+        free(response);
+        return NULL;
+    }
     response->size = 0;
 
     curl = curl_easy_init();
@@ -149,7 +157,7 @@ char *get_song_url(const char *song_hash)
     cJSON *url_obj = cJSON_GetArrayItem(urls, 0);
     if (url_obj && url_obj->valuestring)
     {
-        strncpy(song_url, url_obj->valuestring, 1023);
+        copy_utf8_bounded(song_url, url_obj->valuestring, 1024);
     }
     free(response->data);
     free(response);
@@ -219,14 +227,14 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
         return -1;
     }
     memset(new_song, 0, sizeof(playlist_t));
-    strncpy(new_song->song_name, song_name, sizeof(new_song->song_name) - 1);
-    strncpy(new_song->song_hash, song_hash, sizeof(new_song->song_hash) - 1);
-    strncpy(new_song->singer_name, singer_name, sizeof(new_song->singer_name) - 1);
-    strncpy(new_song->album_name, album_name, sizeof(new_song->album_name) - 1);
-    strncpy(new_song->duration, duration, sizeof(new_song->duration) - 1);
-    strncpy(new_song->cover_url, cover_url, sizeof(new_song->cover_url) - 1);
-    strncpy(new_song->added_by_nickname, client->nickname, sizeof(new_song->added_by_nickname) - 1);
-    strncpy(new_song->added_by_avatar, client->avatar_url, sizeof(new_song->added_by_avatar) - 1);
+    copy_utf8_bounded(new_song->song_name, song_name, sizeof(new_song->song_name));
+    copy_utf8_bounded(new_song->song_hash, song_hash, sizeof(new_song->song_hash));
+    copy_utf8_bounded(new_song->singer_name, singer_name, sizeof(new_song->singer_name));
+    copy_utf8_bounded(new_song->album_name, album_name, sizeof(new_song->album_name));
+    copy_utf8_bounded(new_song->duration, duration, sizeof(new_song->duration));
+    copy_utf8_bounded(new_song->cover_url, cover_url, sizeof(new_song->cover_url));
+    copy_utf8_bounded(new_song->added_by_nickname, client->nickname, sizeof(new_song->added_by_nickname));
+    copy_utf8_bounded(new_song->added_by_avatar, client->avatar_url, sizeof(new_song->added_by_avatar));
     new_song->is_system = 0;
     new_song->next = NULL;
 
@@ -247,7 +255,7 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     {
         pthread_mutex_unlock(&room->lock);
     }
-    char message[128] = {0};
+    char message[256] = {0};
     snprintf(message, sizeof(message), "添加歌曲：%s", song_name);
     init_room_action(room, client->userId, client->nickname, client->avatar_url, ADD_SONG_TO_PLAYLIST, message);
     return 0;
@@ -265,13 +273,13 @@ int insert_system_song(rooms_t *room, const char *song_name, const char *song_ha
     if (!new_song)
         return -1;
     memset(new_song, 0, sizeof(playlist_t));
-    strncpy(new_song->song_name, song_name, sizeof(new_song->song_name) - 1);
-    strncpy(new_song->song_hash, song_hash, sizeof(new_song->song_hash) - 1);
-    strncpy(new_song->singer_name, singer_name, sizeof(new_song->singer_name) - 1);
-    strncpy(new_song->album_name, album_name, sizeof(new_song->album_name) - 1);
-    strncpy(new_song->duration, duration, sizeof(new_song->duration) - 1);
-    strncpy(new_song->cover_url, cover_url, sizeof(new_song->cover_url) - 1);
-    strncpy(new_song->added_by_nickname, "系统推荐", sizeof(new_song->added_by_nickname) - 1);
+    copy_utf8_bounded(new_song->song_name, song_name, sizeof(new_song->song_name));
+    copy_utf8_bounded(new_song->song_hash, song_hash, sizeof(new_song->song_hash));
+    copy_utf8_bounded(new_song->singer_name, singer_name, sizeof(new_song->singer_name));
+    copy_utf8_bounded(new_song->album_name, album_name, sizeof(new_song->album_name));
+    copy_utf8_bounded(new_song->duration, duration, sizeof(new_song->duration));
+    copy_utf8_bounded(new_song->cover_url, cover_url, sizeof(new_song->cover_url));
+    copy_utf8_bounded(new_song->added_by_nickname, "系统推荐", sizeof(new_song->added_by_nickname));
     new_song->is_system = 1;
     new_song->next = NULL;
 
@@ -296,7 +304,7 @@ int insert_system_song(rooms_t *room, const char *song_name, const char *song_ha
     strncpy(room->recommended_hashes[slot], song_hash, sizeof(room->recommended_hashes[slot]) - 1);
     room->recommended_count++;
 
-    char message[128] = {0};
+    char message[256] = {0};
     snprintf(message, sizeof(message), "推荐了歌曲：%s", song_name);
     init_room_action(room, "system", "系统", "", BROADCAST_ROOM_ACTION, message);
 
@@ -350,7 +358,7 @@ static void extract_song_fields(cJSON *song, char *singer_name, int singer_len,
     cJSON *author = cJSON_GetObjectItem(song, "author_name");
     if (cJSON_IsString(author) && strlen(author->valuestring) > 0)
     {
-        strncpy(singer_name, author->valuestring, singer_len - 1);
+        copy_utf8_bounded(singer_name, author->valuestring, singer_len);
     }
     else
     {
@@ -360,20 +368,20 @@ static void extract_song_fields(cJSON *song, char *singer_name, int singer_len,
             cJSON *first = cJSON_GetArrayItem(authors, 0);
             cJSON *name = cJSON_GetObjectItem(first, "author_name");
             if (cJSON_IsString(name))
-                strncpy(singer_name, name->valuestring, singer_len - 1);
+                copy_utf8_bounded(singer_name, name->valuestring, singer_len);
         }
     }
 
     // 专辑名
     cJSON *album = cJSON_GetObjectItem(song, "album_name");
     if (cJSON_IsString(album))
-        strncpy(album_name, album->valuestring, album_len - 1);
+        copy_utf8_bounded(album_name, album->valuestring, album_len);
 
     // 封面：sizable_cover > trans_param.union_cover > album_sizable_cover
     cJSON *sizable = cJSON_GetObjectItem(song, "sizable_cover");
     if (cJSON_IsString(sizable) && strlen(sizable->valuestring) > 0)
     {
-        strncpy(cover_url, sizable->valuestring, cover_len - 1);
+        copy_utf8_bounded(cover_url, sizable->valuestring, cover_len);
     }
     else
     {
@@ -382,29 +390,32 @@ static void extract_song_fields(cJSON *song, char *singer_name, int singer_len,
         {
             cJSON *uc = cJSON_GetObjectItem(tp, "union_cover");
             if (cJSON_IsString(uc) && strlen(uc->valuestring) > 0)
-                strncpy(cover_url, uc->valuestring, cover_len - 1);
+                copy_utf8_bounded(cover_url, uc->valuestring, cover_len);
         }
     }
     if (strlen(cover_url) == 0)
     {
         cJSON *asc = cJSON_GetObjectItem(song, "album_sizable_cover");
         if (cJSON_IsString(asc))
-            strncpy(cover_url, asc->valuestring, cover_len - 1);
+            copy_utf8_bounded(cover_url, asc->valuestring, cover_len);
     }
 
-    // 替换 {size} 占位符为实际尺寸
+    // 替换 {size} 占位符为实际尺寸（"400" 比 "{size}" 短，结果必不长于原串）
     if (strlen(cover_url) > 0)
     {
         char *pos = strstr(cover_url, "{size}");
         if (pos)
         {
-            char tmp[512] = "";
-            int prefix_len = pos - cover_url;
-            strncpy(tmp, cover_url, prefix_len);
-            strcat(tmp, "400");
-            strcat(tmp, pos + 6); // skip "{size}"
-            strncpy(cover_url, tmp, cover_len - 1);
-            cover_url[cover_len - 1] = '\0';
+            int prefix_len = (int)(pos - cover_url);
+            int suffix_len = (int)strlen(pos + 6); // 跳过 "{size}"
+            int needed = prefix_len + 3 /*"400"*/ + suffix_len;
+            char *tmp = (char *)malloc(needed + 1);
+            if (tmp)
+            {
+                snprintf(tmp, needed + 1, "%.*s400%s", prefix_len, cover_url, pos + 6);
+                copy_utf8_bounded(cover_url, tmp, cover_len);
+                free(tmp);
+            }
         }
     }
 
@@ -646,21 +657,20 @@ int update_playing_info(rooms_t *room)
 
     pthread_mutex_lock(&playing_info->lock);
 
-    strncpy(playing_info->song_name, curr->song_name, sizeof(playing_info->song_name) - 1);
-    strncpy(playing_info->song_hash, curr->song_hash, sizeof(playing_info->song_hash) - 1);
-    strncpy(playing_info->singer_name, curr->singer_name, sizeof(playing_info->singer_name) - 1);
-    strncpy(playing_info->album_name, curr->album_name, sizeof(playing_info->album_name) - 1);
-    strncpy(playing_info->duration, curr->duration, sizeof(playing_info->duration) - 1);
-    strncpy(playing_info->cover_url, curr->cover_url, sizeof(playing_info->cover_url) - 1);
+    copy_utf8_bounded(playing_info->song_name, curr->song_name, sizeof(playing_info->song_name));
+    copy_utf8_bounded(playing_info->song_hash, curr->song_hash, sizeof(playing_info->song_hash));
+    copy_utf8_bounded(playing_info->singer_name, curr->singer_name, sizeof(playing_info->singer_name));
+    copy_utf8_bounded(playing_info->album_name, curr->album_name, sizeof(playing_info->album_name));
+    copy_utf8_bounded(playing_info->duration, curr->duration, sizeof(playing_info->duration));
+    copy_utf8_bounded(playing_info->cover_url, curr->cover_url, sizeof(playing_info->cover_url));
     if (song_url)
     {
-        strncpy(playing_info->song_url, song_url, sizeof(playing_info->song_url) - 1);
+        copy_utf8_bounded(playing_info->song_url, song_url, sizeof(playing_info->song_url));
         free(song_url);
     }
     playing_info->played_percent = 0; // 重置播放进度
     playing_info->is_playing = 1;     // 设置为正在播放
-    playing_info->start_time = time(NULL);
-    playing_info->last_update_time = playing_info->start_time;
+    playing_info->last_update_time = time(NULL);
     lws_sul_schedule(context, 0, &playing_info->timer, timer_callback, 1 * LWS_US_PER_SEC);
     pthread_mutex_unlock(&playing_info->lock);
 
@@ -867,36 +877,6 @@ const char *get_cur_song_progress(rooms_t *room)
     pthread_mutex_unlock(&room->playing_info.lock);
 
     const char *json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    return json_str;
-}
-
-// 获取当前播放进度，用于JSON广播
-const char *get_cur_played_percent(rooms_t *room)
-{
-    cJSON *root = cJSON_CreateObject();
-    if (!root)
-    {
-        return NULL;
-    }
-    cJSON *data = cJSON_CreateObject();
-    if (!data)
-    {
-        cJSON_Delete(root);
-        return NULL;
-    }
-
-    pthread_mutex_lock(&room->playing_info.lock);
-
-    cJSON_AddNumberToObject(data, "played_percent", room->playing_info.played_percent);
-    cJSON_AddNumberToObject(root, "error_code", SUCCESS);
-    cJSON_AddStringToObject(root, "status", "success");
-    cJSON_AddNumberToObject(root, "action", BROADCAST_SONG_INFO);
-    cJSON_AddItemToObject(root, "data", data);
-
-    pthread_mutex_unlock(&room->playing_info.lock);
-
-    const char *json_str = cJSON_Print(root);
     cJSON_Delete(root);
     return json_str;
 }

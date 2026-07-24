@@ -2,11 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <libwebsockets.h>
+#include "utf8.h"
 
 // 初始化房间操作链表（带头结点）
 room_ctrl_t *init_action_list()
 {
     room_ctrl_t *head = (room_ctrl_t *)malloc(sizeof(room_ctrl_t));
+    if (!head)
+    {
+        lwsl_err("Failed to allocate memory for room_ctrl_t\n");
+        return NULL;
+    }
     memset(head, 0, sizeof(room_ctrl_t));
     return head;
 }
@@ -61,12 +67,17 @@ bool init_room_action(rooms_t *room, char *userid, char *nickname, char *avatar_
     }
 
     room_ctrl_t *new_node = (room_ctrl_t *)malloc(sizeof(room_ctrl_t));
+    if (!new_node)
+    {
+        lwsl_err("Failed to allocate memory for room_ctrl_t\n");
+        return false;
+    }
     memset(new_node, 0, sizeof(room_ctrl_t));
     strncpy(new_node->userid, userid, 63);
-    if (nickname) strncpy(new_node->nickname, nickname, sizeof(new_node->nickname) - 1);
-    if (avatar_url) strncpy(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url) - 1);
+    if (nickname) copy_utf8_bounded(new_node->nickname, nickname, sizeof(new_node->nickname));
+    if (avatar_url) copy_utf8_bounded(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url));
     new_node->action = action;
-    strncpy(new_node->action_message, action_message, 511);
+    copy_utf8_bounded(new_node->action_message, action_message, sizeof(new_node->action_message));
     new_node->action_time = time(NULL);
     return insert_room_action(room, new_node);
 }
@@ -120,7 +131,7 @@ rooms_t *insert_room_info(const char *room_id, const char *creater_id, rooms_t *
     if (!new_node)
     {
         lwsl_err("Failed to allocate memory for rooms\n");
-        return false;
+        return NULL;
     }
     memset(new_node, 0, sizeof(rooms_t));
     strncpy(new_node->room_id, room_id, 63);
@@ -154,9 +165,22 @@ rooms_t *insert_room_info(const char *room_id, const char *creater_id, rooms_t *
     new_node->playing_info.room = new_node;
     new_node->next = NULL;
     new_node->room_ctrl_head = init_action_list();
+    if (!new_node->room_ctrl_head)
+    {
+        lwsl_err("Failed to allocate memory for room_ctrl_head\n");
+        pthread_mutex_destroy(&new_node->lock);
+        pthread_mutex_destroy(&new_node->playing_info.lock);
+        free(new_node->playlist_head);
+        free(new_node->client_info);
+        free(new_node->latest_msg);
+        free(new_node);
+        return NULL;
+    }
     if (!insert_room_node(head, new_node))
     {
         lwsl_err("Failed to insert room node\n");
+        pthread_mutex_destroy(&new_node->lock);
+        pthread_mutex_destroy(&new_node->playing_info.lock);
         free(new_node->playlist_head);
         free(new_node->client_info);
         free(new_node->room_ctrl_head);

@@ -17,7 +17,6 @@ int resume_song(client_info_t *client);
 const char *get_playlist_json(rooms_t *room, enum ctrl cmd);
 const char *get_playlist_and_song_info_json(rooms_t *room);
 int upsongbyhash(client_info_t *client, const char *song_hash);
-const char *get_cur_played_percent(rooms_t *room);
 const char *get_client_list_json(rooms_t *room, enum ctrl cmd);
 int play_next_song_bysystem(rooms_t *room);
 const char *get_room_actions_json(rooms_t *room, int max_count);

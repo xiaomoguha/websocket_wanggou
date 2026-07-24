@@ -72,3 +72,4 @@ build/.cmake/api/v1/reply/cmakeFiles-v1-56ad78317ca0356d5d46.json
 build/.cmake/api/v1/reply/cache-v2-20642ff90a2de9ad475a.json
 build/.cmake/api/v1/query/client-vscode/query.json
 build/compile_commands.json
+.DS_Store

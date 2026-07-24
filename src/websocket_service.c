@@ -11,6 +11,7 @@
 #include "types.h"
 #include <stdbool.h>
 #include "playlist.h"
+#include "utf8.h"
 
 int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len);
 static void success_response(client_info_t *client, const char *msg);
@@ -58,7 +59,7 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
     if (!new_node)
     {
         lwsl_err("Failed to allocate memory for client_info_t\n");
-        return false;
+        return NULL;
     }
     memset(new_node, 0, sizeof(client_info_t));
     pthread_mutex_init(&new_node->lock, NULL);
@@ -66,8 +67,8 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
     strncpy(new_node->ip, ip, INET_ADDRSTRLEN - 1);
     new_node->room = room;
     strncpy(new_node->userId, userId, 63);
-    if (nickname) strncpy(new_node->nickname, nickname, sizeof(new_node->nickname) - 1);
-    if (avatar_url) strncpy(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url) - 1);
+    if (nickname) copy_utf8_bounded(new_node->nickname, nickname, sizeof(new_node->nickname));
+    if (avatar_url) copy_utf8_bounded(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url));
     new_node->next = NULL;
     new_node->prev = NULL;
     if (!insert_client_node(room->client_info, new_node))
@@ -80,39 +81,11 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
     return new_node;
 }
 
-// 对应房间客户端发送广播消息
-void submit_broadcast_message(struct lws *wsi, const char *msg)
-{
-    if (!msg)
-    {
-        lwsl_err("Message is NULL\n");
-        return;
-    }
-    client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
-    if (!client)
-    {
-        lwsl_err("Client info is NULL\n");
-        return;
-    }
-    pthread_mutex_lock(&client->room->lock);
-    free(client->room->latest_msg);
-    client->room->latest_msg = strdup(msg);
-    pthread_mutex_unlock(&client->room->lock);
-
-    // 遍历该房间客户端链表，唤醒对应客户端发送信息
-    for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
-    {
-        if (cur->wsi)
-        {
-            lws_callback_on_writable(cur->wsi);
-        }
-    }
-    lws_cancel_service(context);
-}
-
 // 对应房间发送广播信息
 static void broadcast_response_room(rooms_t *room, const char *msg)
 {
+    if (!room || !msg)
+        return;
     pthread_mutex_lock(&room->lock);
     free(room->latest_msg);
     room->latest_msg = strdup(msg);
@@ -183,14 +156,10 @@ static void operation_response(client_info_t *client, const char *msg)
     }
 }
 
-// 信号处理函数，用于优雅退出
-static void sigint_handler(int sig)
+// 信号处理函数，用于优雅退出（SIGINT / SIGTERM 共用）
+static void signal_handler(int sig)
 {
-    interrupted = 1;
-}
-
-static void sigterm_handler(int sig)
-{
+    (void)sig;
     interrupted = 1;
 }
 
@@ -213,12 +182,6 @@ static void log_emit_function(int level, const char *line)
         fprintf(log_file, "[%s] %s", timebuf, line);
         fflush(log_file);
     }
-}
-
-static int client_callback_filter(struct lws *wsi)
-{
-    lwsl_notice("新的客户端申请连接\n");
-    return 0;
 }
 
 static void print_room_info(rooms_t *room)
@@ -894,7 +857,8 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             }
             else
             {
-                error_response(client, strlen(msg_item->valuestring) > 500 ? "消息过长，最多500字" : "消息不能为空");
+                int msg_len = (msg_item && cJSON_IsString(msg_item)) ? (int)strlen(msg_item->valuestring) : 0;
+                error_response(client, msg_len > 500 ? "消息过长，最多500字" : "消息不能为空");
             }
         }
         break;
@@ -1046,7 +1010,6 @@ int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
     }
     // 过滤新连接请求
     case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
-        // ret = client_callback_filter(wsi);
         break;
     // 新连接建立
     case LWS_CALLBACK_ESTABLISHED:
@@ -1155,8 +1118,8 @@ int main(int argc, const char **argv)
     }
 
     // 设置信号处理
-    signal(SIGINT, sigint_handler);
-    signal(SIGTERM, sigterm_handler);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
 
     // 初始化上下文创建信息
     memset(&info, 0, sizeof info);
