@@ -167,6 +167,33 @@ char *get_song_url(const char *song_hash)
     return song_url;
 }
 
+// 把播放进度推进到当前时刻(按需构建 JSON 快照前调用,须持 playing_info.lock)。
+// played_percent 平时只在 5s 定时器里累加,事件触发的广播(别人加歌/切歌/暂停
+// 恢复等)直接读快照最多滞后 5s——客户端拿旧快照对比本地实时进度会误判偏差
+// 超 3s,先向后 seek,下一拍新鲜进度又向前 seek 追回,听感即"卡一下"。
+// 此处就地推进并把 last_update_time 归位到 now,定时器下一拍从新基准累加,
+// 不会重复计入。暂停中(is_playing=0)进度冻结,直接返回。
+static void advance_playing_percent(rooms_t *room)
+{
+    playing_info_t *pi = &room->playing_info;
+    if (!pi->is_playing)
+        return;
+    // 与 timer_callback 相同的时长解析("mm:ss" 或纯秒),含非法时长 240s 兜底
+    float duration = 0;
+    char *colon = strchr(pi->duration, ':');
+    if (colon)
+        duration = atoi(pi->duration) * 60 + atoi(colon + 1);
+    else
+        duration = atof(pi->duration);
+    if (duration <= 0)
+        duration = 240;
+    time_t now = time(NULL);
+    if (now <= pi->last_update_time)
+        return;
+    pi->played_percent += (double)(now - pi->last_update_time) / duration;
+    pi->last_update_time = now;
+}
+
 // 获取该房间所有的客户端信息
 const char *get_client_list_json(rooms_t *room, enum ctrl cmd)
 {
@@ -964,6 +991,7 @@ const char *get_cur_song_progress(rooms_t *room)
     }
 
     pthread_mutex_lock(&room->playing_info.lock);
+    advance_playing_percent(room);   // 快照前推进进度,避免广播滞后值
 
     cJSON_AddNumberToObject(root, "error_code", SUCCESS);
     cJSON_AddStringToObject(root, "status", "success");
@@ -994,6 +1022,7 @@ const char *get_cur_song_info(rooms_t *room, enum ctrl cmd)
     }
 
     pthread_mutex_lock(&room->playing_info.lock);
+    advance_playing_percent(room);   // 快照前推进进度,避免广播滞后值
 
     cJSON_AddNumberToObject(root, "error_code", SUCCESS);
     cJSON_AddStringToObject(root, "status", "success");
@@ -1124,6 +1153,7 @@ const char *get_playlist_and_song_info_json(rooms_t *room)
     {
         cJSON *data = cJSON_CreateObject();
         pthread_mutex_lock(&room->playing_info.lock);
+        advance_playing_percent(room);   // 快照前推进进度,避免广播滞后值
         cJSON_AddStringToObject(data, "songname", room->playing_info.song_name);
         cJSON_AddStringToObject(data, "songhash", room->playing_info.song_hash);
         cJSON_AddStringToObject(data, "singername", room->playing_info.singer_name);
