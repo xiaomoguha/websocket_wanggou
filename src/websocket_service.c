@@ -220,6 +220,13 @@ void timer_callback(lws_sorted_usec_list_t *sul)
                 duration = atof(playing_info->duration);
             }
         }
+        // 兜底：时长为空/非法（如早期私人FM加的歌没带 duration）时，下面的
+        // 除法会除零得 inf，进度瞬间爆表 → 服务器连环切歌、客户端跟着疯狂
+        // 切歌（死循环）。按 240s 常规歌曲时长推进，保证至少能正常轮转。
+        if (duration <= 0)
+        {
+            duration = 240;
+        }
         time_t now = time(NULL);
         // 更新进度偏移
         double offset = (now - playing_info->last_update_time) / duration;
