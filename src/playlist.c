@@ -257,8 +257,51 @@ static void url_encode_buf(const char *in, char *out, int out_len)
     out[o] = '\0';
 }
 
-// 时长缺失时按 hash 现查真实时长：用「歌名 歌手」调 /search，
-// 结果里按 hash 精确匹配（避免模糊命中 Live/伴奏版），取 duration(秒)。
+// 时长缺失时按 hash 直查真实时长：GET /privilege/lite?hash=...，
+// 响应 data[0].info.duration 为毫秒。hash 直查天然精确——私人 FM 推的歌
+// 其 hash 常常不在文本搜索索引里（搜索返回的是其他音质版本的 hash），
+// 旧客户端加 FM 歌全靠这条路。查到返回 1 并写入 out("mm:ss")；失败返回 0。
+static int fetch_duration_by_hash_lite(const char *song_hash, char *out, int out_len)
+{
+    if (!song_hash || !song_hash[0])
+        return 0;
+    char url[512] = {0};
+    snprintf(url, sizeof(url), "%s/privilege/lite?hash=%s", SERVICE_BASE_URL, song_hash);
+
+    struct ResponseData *resp = http_request(url, "GET", NULL, NULL);
+    if (!resp || !resp->data || resp->size == 0)
+    {
+        if (resp)
+        {
+            free(resp->data);
+            free(resp);
+        }
+        return 0;
+    }
+    cJSON *root = cJSON_Parse(resp->data);
+    free(resp->data);
+    free(resp);
+    if (!root)
+        return 0;
+
+    int found = 0;
+    cJSON *item = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "data"), 0);
+    cJSON *dur = cJSON_GetObjectItem(cJSON_GetObjectItem(item, "info"), "duration");
+    if (cJSON_IsNumber(dur) && dur->valueint > 0)
+    {
+        int sec = dur->valueint / 1000;   // 毫秒 → 秒
+        if (sec > 0)
+        {
+            snprintf(out, out_len, "%02d:%02d", sec / 60, sec % 60);
+            found = 1;
+        }
+    }
+    cJSON_Delete(root);
+    return found;
+}
+
+// 兜底：用「歌名 歌手」调 /search，结果里按 hash 精确匹配
+// （避免模糊命中 Live/伴奏版），取 duration(秒)。
 // 查到返回 1 并写入 out("mm:ss")；失败返回 0（调用方走 240s 兜底）。
 static int fetch_real_duration(const char *song_name, const char *singer_name,
                                const char *song_hash, char *out, int out_len)
@@ -331,18 +374,21 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
     }
     pthread_mutex_unlock(&room->lock);
 
-    // 时长缺失/非法（空串、"--:--"、"00:00"）：按 hash 现查一次补齐。
-    // 仍匹配不到则直接拒收——没有时长的歌进列表会让进度推进/同步失真。
+    // 时长缺失/非法（空串、"--:--"、"00:00"）：现查补齐。
+    // 首选 privilege/lite 按 hash 直查（精确，覆盖 FM 歌）；
+    // 失败再走「歌名 歌手」搜索 + hash 匹配兜底。
+    // 两路都拿不到则拒收——没有时长的歌进列表会让进度推进/同步失真。
     char real_duration[16] = {0};
     if (parse_duration_secs(duration) <= 0)
     {
-        if (!fetch_real_duration(song_name, singer_name, song_hash, real_duration, sizeof(real_duration)))
+        if (!fetch_duration_by_hash_lite(song_hash, real_duration, sizeof(real_duration))
+            && !fetch_real_duration(song_name, singer_name, song_hash, real_duration, sizeof(real_duration)))
         {
-            lwsl_notice("insert_song: 拒收无时长歌曲 %s (hash=%s 搜索未按 hash 匹配到)\n",
+            lwsl_notice("insert_song: 拒收无时长歌曲 %s (hash=%s lite/搜索均未取到时长)\n",
                         song_name, song_hash);
             return -3;
         }
-        lwsl_notice("insert_song: 时长缺失已按 hash 回填 %s <- %s\n", real_duration, song_name);
+        lwsl_notice("insert_song: 时长缺失已回填 %s <- %s\n", real_duration, song_name);
         duration = real_duration;
     }
 
