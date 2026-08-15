@@ -749,7 +749,8 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             char *albumname = cJSON_GetObjectItem(params, "albumname") ? cJSON_GetObjectItem(params, "albumname")->valuestring : "";
             char *duration = cJSON_GetObjectItem(params, "duration") ? cJSON_GetObjectItem(params, "duration")->valuestring : "";
             char *coverurl = cJSON_GetObjectItem(params, "coverurl") ? cJSON_GetObjectItem(params, "coverurl")->valuestring : "";
-            if (insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl) >= 0)
+            int ins_ret = insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl);
+            if (ins_ret >= 0)
             {
                 // 操作者收到 playlist + 操作日志
                 const char *playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
@@ -769,9 +770,17 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 free((void *)combined_json);
                 free((void *)actions_json);
             }
-            else
+            else if (ins_ret == -2)
             {
                 error_response_with_action(client, "该歌曲已在播放列表中", ADD_SONG_TO_PLAYLIST);
+            }
+            else if (ins_ret == -3)
+            {
+                error_response_with_action(client, "加歌失败：未能匹配到该歌曲的时长信息，请稍后重试或换一首", ADD_SONG_TO_PLAYLIST);
+            }
+            else
+            {
+                error_response_with_action(client, "加歌失败，请稍后重试", ADD_SONG_TO_PLAYLIST);
             }
         }
         else

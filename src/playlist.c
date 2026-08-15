@@ -1,5 +1,7 @@
 #include <stdlib.h>
 #include <time.h>
+#include <ctype.h>
+#include <string.h>
 #include <libwebsockets.h>
 #include "cJSON.h"
 #include "playlist.h"
@@ -198,6 +200,88 @@ const char *get_client_list_json(rooms_t *room, enum ctrl cmd)
     return json;
 }
 
+// 解析时长字符串（"mm:ss" 或纯秒数）为秒；非法/空返回 0
+static int parse_duration_secs(const char *dur)
+{
+    if (!dur)
+        return 0;
+    const char *colon = strchr(dur, ':');
+    if (colon)
+        return atoi(dur) * 60 + atoi(colon + 1);
+    return (int)atof(dur);
+}
+
+// UTF-8 百分号编码（保留字母数字与 -_.~）
+static void url_encode_buf(const char *in, char *out, int out_len)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    int o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o < out_len - 4; p++)
+    {
+        if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~')
+            out[o++] = (char)*p;
+        else
+        {
+            out[o++] = '%';
+            out[o++] = hex[*p >> 4];
+            out[o++] = hex[*p & 0xF];
+        }
+    }
+    out[o] = '\0';
+}
+
+// 时长缺失时按 hash 现查真实时长：用「歌名 歌手」调 /search，
+// 结果里按 hash 精确匹配（避免模糊命中 Live/伴奏版），取 duration(秒)。
+// 查到返回 1 并写入 out("mm:ss")；失败返回 0（调用方走 240s 兜底）。
+static int fetch_real_duration(const char *song_name, const char *singer_name,
+                               const char *song_hash, char *out, int out_len)
+{
+    char keywords[384] = {0};
+    char enc[1152] = {0};
+    snprintf(keywords, sizeof(keywords), "%s %s",
+             song_name ? song_name : "", singer_name ? singer_name : "");
+    url_encode_buf(keywords, enc, sizeof(enc));
+
+    char url[1600] = {0};
+    snprintf(url, sizeof(url), "%s/search?keywords=%s&page=1&pagesize=30", SERVICE_BASE_URL, enc);
+
+    struct ResponseData *resp = http_request(url, "GET", NULL, NULL);
+    if (!resp || !resp->data || resp->size == 0)
+    {
+        if (resp)
+        {
+            free(resp->data);
+            free(resp);
+        }
+        return 0;
+    }
+    cJSON *root = cJSON_Parse(resp->data);
+    free(resp->data);
+    free(resp);
+    if (!root)
+        return 0;
+
+    int found = 0;
+    cJSON *info = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "data"), "info");
+    int n = cJSON_IsArray(info) ? cJSON_GetArraySize(info) : 0;
+    for (int i = 0; i < n; i++)
+    {
+        cJSON *item = cJSON_GetArrayItem(info, i);
+        cJSON *h = cJSON_GetObjectItem(item, "hash");
+        if (!cJSON_IsString(h) || !h->valuestring || strcmp(h->valuestring, song_hash) != 0)
+            continue;
+        cJSON *d = cJSON_GetObjectItem(item, "duration");
+        if (cJSON_IsNumber(d) && d->valueint > 0)
+        {
+            snprintf(out, out_len, "%02d:%02d", d->valueint / 60, d->valueint % 60);
+            found = 1;
+        }
+        break;
+    }
+    cJSON_Delete(root);
+    return found;
+}
+
 int insert_song_to_playlist(client_info_t *client, const char *song_name, const char *song_hash,
                             const char *singer_name, const char *album_name,
                             const char *duration, const char *cover_url)
@@ -219,6 +303,21 @@ int insert_song_to_playlist(client_info_t *client, const char *song_name, const 
         }
     }
     pthread_mutex_unlock(&room->lock);
+
+    // 时长缺失/非法（空串、"--:--"、"00:00"）：按 hash 现查一次补齐。
+    // 仍匹配不到则直接拒收——没有时长的歌进列表会让进度推进/同步失真。
+    char real_duration[16] = {0};
+    if (parse_duration_secs(duration) <= 0)
+    {
+        if (!fetch_real_duration(song_name, singer_name, song_hash, real_duration, sizeof(real_duration)))
+        {
+            lwsl_notice("insert_song: 拒收无时长歌曲 %s (hash=%s 搜索未按 hash 匹配到)\n",
+                        song_name, song_hash);
+            return -3;
+        }
+        lwsl_notice("insert_song: 时长缺失已按 hash 回填 %s <- %s\n", real_duration, song_name);
+        duration = real_duration;
+    }
 
     playlist_t *new_song = (playlist_t *)malloc(sizeof(playlist_t));
     if (!new_song)
