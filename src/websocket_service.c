@@ -1067,7 +1067,7 @@ static void print_usage(const char *prog)
 int main(int argc, const char **argv)
 {
     struct lws_context_creation_info info;
-    const char *iface = "0.0.0.0";
+    const char *iface = "127.0.0.1";
     int port = 3001;
     int opts = 0;
     int daemon_mode = 0;
