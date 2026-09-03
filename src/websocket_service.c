@@ -216,7 +216,7 @@ static void close_room_for_idle(rooms_t *room)
         wsis[n++] = cur->wsi;
     for (int i = 0; i < n; i++)
         if (wsis[i])
-            lws_set_timeout(wsis[i], PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE, LWS_TO_KILL_ASYNC);
+            lws_set_timeout(wsis[i], PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE, 1); /* 1s 后关：先让 room_closed 广播刷出去 */
 }
 
 // 定时更新进度
