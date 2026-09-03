@@ -134,6 +134,7 @@ rooms_t *insert_room_info(const char *room_id, const char *creater_id, rooms_t *
         return NULL;
     }
     memset(new_node, 0, sizeof(rooms_t));
+    new_node->last_user_add_time = time(NULL); // 创建即起算：从未加歌的房间同样回收
     strncpy(new_node->room_id, room_id, 63);
     strncpy(new_node->creater_id, creater_id, 63);
     new_node->client_counter = 0;

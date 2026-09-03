@@ -82,6 +82,7 @@ typedef struct rooms
     char recommended_hashes[50][128];
     int recommended_count;
     int recommend_page;
+    time_t last_user_add_time; // 最近一次用户加歌时间（系统推荐不计）：空闲回收依据
     struct rooms *next;
 } rooms_t;
 // 操作枚举

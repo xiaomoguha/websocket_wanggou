@@ -14,6 +14,10 @@
 #include "utf8.h"
 
 int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len);
+
+// 房间空闲回收：3 小时无人加歌 → 通知全员并断开全部连接。防「客户端全挂着不动、
+// 服务器进度钟一直跑 + 系统推荐无限续歌」的空转
+#define ROOM_IDLE_CLOSE_SEC (3 * 3600)
 static void success_response(client_info_t *client, const char *msg);
 static void error_response(client_info_t *client, const char *msg);
 static void send_message_to_client(client_info_t *client, const char *msg);
@@ -197,11 +201,36 @@ static void print_room_info(rooms_t *room)
     }
 }
 
+// 空闲回收：广播原因后断开全部连接。连接各自的 CLOSED 回收路径会清客户端，
+// 最后一个断开时 remove_room_node 释放房间——此处不 free 任何东西
+static void close_room_for_idle(rooms_t *room)
+{
+    lwsl_notice("房间 %s 已 %d 秒无人加歌，回收：断开全部连接\n", room->room_id, ROOM_IDLE_CLOSE_SEC);
+    const char *idle_msg =
+        "{\"error_code\":1,\"status\":\"room_closed\",\"message\":\"房间已关闭：3 小时无人添加歌曲\"}";
+    broadcast_response_room(room, idle_msg);
+    // 先快照 wsi：KILL 异步触发的 CLOSED 回调会就地改链表，边遍历边断开会踩空
+    struct lws *wsis[128] = {0};
+    int n = 0;
+    for (client_info_t *cur = room->client_info->next; cur != NULL && n < 128; cur = cur->next)
+        wsis[n++] = cur->wsi;
+    for (int i = 0; i < n; i++)
+        if (wsis[i])
+            lws_set_timeout(wsis[i], PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE, LWS_TO_KILL_ASYNC);
+}
+
 // 定时更新进度
 void timer_callback(lws_sorted_usec_list_t *sul)
 {
+    playing_info_t *pi = lws_container_of(sul, playing_info_t, timer);
+    // 空闲检查（每拍 O(1)）：到点即回收，房间将销毁，不再推进进度/续排 tick
+    if (pi->room && difftime(time(NULL), pi->room->last_user_add_time) >= ROOM_IDLE_CLOSE_SEC)
+    {
+        close_room_for_idle(pi->room);
+        return;
+    }
     float duration = 0;
-    playing_info_t *playing_info = lws_container_of(sul, playing_info_t, timer);
+    playing_info_t *playing_info = pi; // 上方空闲检查已取过容器指针
     int callback_time = playing_info->is_playing ? 5000 : 15000;
     if (playing_info->is_playing)
     {
@@ -752,6 +781,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             int ins_ret = insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl);
             if (ins_ret >= 0)
             {
+                client->room->last_user_add_time = time(NULL); // 用户加歌刷新空闲计时（系统推荐不刷新）
                 // 操作者收到 playlist + 操作日志
                 const char *playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 send_message_to_client(client, playlist_json);
