@@ -23,7 +23,7 @@ int insert_songs_to_playlist(client_info_t *client, const cJSON *songs_json,
 int count_pending_songs(rooms_t *room);
 int remove_song_from_playlist(client_info_t *client, const char *song_hash);
 // 点赞/取消点赞（房间内共享，同一用户对同一首歌只记一次）
-int toggle_song_like(client_info_t *client, const char *song_hash);
+int toggle_song_like(client_info_t *client, const char *song_hash, char *song_name, size_t song_name_size);
 int update_playing_info(rooms_t *room);
 int play_next_song(client_info_t *client);
 int playbysonghash(client_info_t *client, const char *song_hash);
@@ -40,5 +40,12 @@ const char *get_room_actions_json(rooms_t *room, int max_count);
 int auto_recommend_song(rooms_t *room);
 int insert_system_song(rooms_t *room, const char *song_name, const char *song_hash,
                        const char *singer_name, const char *album_name,
-                       const char *duration, const char *cover_url);
+                       const char *duration, const char *cover_url,
+                       const char *recommend_source);
+// 一起听 FM 推荐：把预取的 pending 歌曲插入并播放（无当前歌/无下一首时）
+int consume_pending_recommend(rooms_t *room);
+// 一起听 FM 推荐：需要新歌时统一入口（pending -> 客户端 FM -> 旧算法）
+int ensure_room_recommendation(rooms_t *room);
+// 检查 hash 是否已在房间播放列表
+int is_song_hash_in_playlist(rooms_t *room, const char *hash);
 #endif // PLAYLIST_H

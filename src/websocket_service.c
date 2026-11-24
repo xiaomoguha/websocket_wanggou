@@ -22,6 +22,11 @@ int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 static void success_response(client_info_t *client, const char *msg);
 static void error_response(client_info_t *client, const char *msg);
 static void send_message_to_client(client_info_t *client, const char *msg);
+// 一起听 FM 推荐（全部非阻塞：216 -> lws 定时器等 217，超时换人/回退）
+static int start_fm_recommend(rooms_t *room, int force);
+static void handle_fm_recommend_failure(rooms_t *room, const char *reason);
+static void handle_fm_recommend_response(client_info_t *client, cJSON *params);
+static void broadcast_room_state(rooms_t *room);
 
 struct lws_context *context = NULL;
 static int interrupted = 0;
@@ -58,7 +63,8 @@ bool insert_client_node(client_info_t *head, client_info_t *new_node)
 
 // 申请节点并填充客户端信息,返回改节点指针
 client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room,
-                                   const char *userId, const char *nickname, const char *avatar_url)
+                                   const char *userId, const char *nickname, const char *avatar_url,
+                                   int fm_ready)
 {
     client_info_t *new_node = (client_info_t *)malloc(sizeof(client_info_t));
     if (!new_node)
@@ -74,6 +80,7 @@ client_info_t *insert_client_info(struct lws *wsi, const char *ip, rooms_t *room
     strncpy(new_node->userId, userId, 63);
     if (nickname) copy_utf8_bounded(new_node->nickname, nickname, sizeof(new_node->nickname));
     if (avatar_url) copy_utf8_bounded(new_node->avatar_url, avatar_url, sizeof(new_node->avatar_url));
+    new_node->fm_ready = fm_ready ? 1 : 0;
     new_node->next = NULL;
     new_node->prev = NULL;
     if (!insert_client_node(room->client_info, new_node))
@@ -277,6 +284,22 @@ void timer_callback(lws_sorted_usec_list_t *sul)
         song_changed = 1;
         play_next_song_bysystem(playing_info->room);
     }
+    // FM 推荐：房内没歌时立即要歌（pending -> 客户端 FM -> 旧算法）；
+    // 队列只剩 0~2 首时提前预取。拿到后只放 pending，不插队。
+    rooms_t *room = playing_info->room;
+    if (room && !room->fm_recommend.active)
+    {
+        if (!room->current_song)
+        {
+            ensure_room_recommendation(room);
+            if (room->current_song)
+                song_changed = 1;
+        }
+        else if (!room->pending_recommend && count_pending_songs(room) <= 2)
+        {
+            start_fm_recommend(room, 0);
+        }
+    }
     // 有歌曲的时候广播
     if (playing_info->room->current_song)
     {
@@ -312,6 +335,8 @@ static int client_callback_established(struct lws *wsi)
     char userId[64] = {0};
     char nickname[128] = {0};
     char avatar_url[512] = {0};
+    char fm_ready[32] = {0};
+    int fm_ready_flag = 0;
     char client_ip[64] = {0};
     rooms_t *new_room = NULL;
     client_info_t *new_client = NULL;
@@ -357,10 +382,18 @@ static int client_callback_established(struct lws *wsi)
         return -1;
     }
 
+    lws_get_urlarg_by_name_safe(wsi, "fm_ready", fm_ready, sizeof(fm_ready));
     lws_get_urlarg_by_name(wsi, "roomid", roomid, sizeof(roomid));
     lws_get_urlarg_by_name(wsi, "userid", userId, sizeof(userId));
     lws_get_urlarg_by_name(wsi, "nickname", nickname, sizeof(nickname));
     lws_get_urlarg_by_name(wsi, "avatar", avatar_url, sizeof(avatar_url));
+    const char *fm_ready_value = strchr(fm_ready, '=');
+    if (fm_ready_value)
+        fm_ready_value++;
+    else
+        fm_ready_value = fm_ready;
+    if (fm_ready_value[0] == '1')
+        fm_ready_flag = 1;
 
     if (!strlen(roomid) || !strlen(userId))
     {
@@ -372,7 +405,7 @@ static int client_callback_established(struct lws *wsi)
     {
         if (strcmp(room->room_id, roomid) == 0)
         {
-            if (!(new_client = insert_client_info(wsi, client_ip, room, userId, nickname, avatar_url)))
+            if (!(new_client = insert_client_info(wsi, client_ip, room, userId, nickname, avatar_url, fm_ready_flag)))
             {
                 lwsl_err("Failed to insert client info\n");
                 return -1;
@@ -380,10 +413,11 @@ static int client_callback_established(struct lws *wsi)
             lws_set_opaque_user_data(wsi, new_client);
             lwsl_notice("客户端加入房间: %s\n", roomid);
             monitor_emit_join(roomid, new_client);
-            // 如果房间没有歌曲，自动推荐一首
+            // 新客户端可能带 fm_ready；清掉旧冷却，房间空了则立即要歌
+            room->fm_recommend.retry_after = 0;
             if (!room->current_song && !room->playlist_head->next)
             {
-                auto_recommend_song(room);
+                ensure_room_recommendation(room);
             }
             // 打印房间信息以及客户端信息
             for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
@@ -429,9 +463,7 @@ static int client_callback_established(struct lws *wsi)
     monitor_emit_room_create(new_room, userId, nickname, client_ip);
     lwsl_notice("创建房间成功，启动定时器\n");
     lws_sul_schedule(context, 0, &new_room->playing_info.timer, timer_callback, LWS_US_PER_SEC * 5);
-    // 自动推荐第一首歌
-    auto_recommend_song(new_room);
-    if (!(new_client = insert_client_info(wsi, client_ip, new_room, userId, nickname, avatar_url)))
+    if (!(new_client = insert_client_info(wsi, client_ip, new_room, userId, nickname, avatar_url, fm_ready_flag)))
     {
         lwsl_err("Failed to insert client info\n");
         return -1;
@@ -439,6 +471,9 @@ static int client_callback_established(struct lws *wsi)
     lws_set_opaque_user_data(wsi, new_client);
     lwsl_notice("客户端加入房间: %s\n", roomid);
     monitor_emit_join(roomid, new_client);
+    // 先有客户端再要第一首歌：新客户端可代拉个人FM；否则 ensure 回退旧算法
+    new_room->fm_recommend.retry_after = 0;
+    ensure_room_recommendation(new_room);
     // 打印房间信息以及客户端信息
     for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
     {
@@ -680,6 +715,290 @@ static void send_message_to_client(client_info_t *client, const char *msg)
     pthread_mutex_unlock(&client->lock);
     lws_callback_on_writable(client->wsi);
     lws_cancel_service(context);
+}
+
+/* ===================== 一起听 FM 推荐 ===================== */
+
+// 预取结果/客户端拒绝后，把结果统一广播给房间
+static void broadcast_room_state(rooms_t *room)
+{
+    if (!room)
+        return;
+    const char *combined = get_playlist_and_song_info_json(room);
+    const char *actions_json = get_room_actions_json(room, 1);
+    char *final = combine_json_with_actions(combined, actions_json);
+    broadcast_response_room(room, final ? final : combined);
+    free(final);
+    free((void *)combined);
+    free((void *)actions_json);
+}
+
+// 216 超时：不阻塞事件循环，只换人/回退
+static void fm_timeout_cb(lws_sorted_usec_list_t *sul)
+{
+    rooms_t *room = lws_container_of(sul, rooms_t, fm_timer);
+    if (!room)
+        return;
+    lwsl_notice("FM recommend timeout: room=%s target=%s\n", room->room_id, room->fm_recommend.target_userid);
+    handle_fm_recommend_failure(room, "timeout");
+}
+
+// 选择下一个 fm_ready 客户端并发 216；返回 1 表示已发出，0 表示没有可用客户端
+static int request_fm_recommend(rooms_t *room)
+{
+    if (!room)
+        return 0;
+    if (room->fm_recommend.active || room->pending_recommend)
+        return 1;
+    if (room->fm_recommend.tried_count >= FM_RECOMMEND_MAX_TRIES)
+        return 0;
+
+    client_info_t *target = NULL;
+    int candidates = 0;
+    pthread_mutex_lock(&room->lock);
+    for (client_info_t *cur = room->client_info->next; cur; cur = cur->next)
+    {
+        if (!cur->wsi || !cur->fm_ready || !cur->userId[0])
+        {
+            continue;
+        }
+        int tried = 0;
+        for (int i = 0; i < room->fm_recommend.tried_count; i++)
+        {
+            if (strcmp(room->fm_recommend.tried_userids[i], cur->userId) == 0)
+            {
+                tried = 1;
+                break;
+            }
+        }
+        if (tried)
+            continue;
+        candidates++;
+        if (rand() % candidates == 0)
+            target = cur;
+    }
+    if (!target)
+    {
+        pthread_mutex_unlock(&room->lock);
+        return 0;
+    }
+
+    static unsigned long fm_seq = 0;
+    snprintf(room->fm_recommend.request_id, sizeof(room->fm_recommend.request_id),
+             "%s-%lu-%lu", room->room_id, (unsigned long)time(NULL), ++fm_seq);
+    copy_utf8_bounded(room->fm_recommend.target_userid, target->userId,
+                      sizeof(room->fm_recommend.target_userid));
+    copy_utf8_bounded(room->fm_recommend.tried_userids[room->fm_recommend.tried_count],
+                      target->userId,
+                      sizeof(room->fm_recommend.tried_userids[room->fm_recommend.tried_count]));
+    room->fm_recommend.tried_count++;
+    room->fm_recommend.attempt++;
+    room->fm_recommend.active = 1;
+    pthread_mutex_unlock(&room->lock);
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        handle_fm_recommend_failure(room, "alloc");
+        return 0;
+    }
+    cJSON_AddNumberToObject(root, "action", REQUEST_FM_RECOMMEND);
+    cJSON_AddStringToObject(root, "request_id", room->fm_recommend.request_id);
+    cJSON_AddNumberToObject(root, "timeout_ms", 3000);
+    cJSON_AddNumberToObject(root, "want", 5);
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json_str)
+    {
+        handle_fm_recommend_failure(room, "json");
+        return 0;
+    }
+    send_message_to_client(target, json_str);
+    free(json_str);
+
+    lws_sul_cancel(&room->fm_timer);
+    lws_sul_schedule(context, 0, &room->fm_timer, fm_timeout_cb, 3000 * LWS_US_PER_MS);
+    lwsl_notice("FM recommend request: room=%s target=%s id=%s try=%d\n",
+                room->room_id, target->userId, room->fm_recommend.request_id, room->fm_recommend.tried_count);
+    return 1;
+}
+
+// 开始一轮推荐；force=1 表示当前没歌，忽略冷却
+static int start_fm_recommend(rooms_t *room, int force)
+{
+    if (!room)
+        return 0;
+    if (room->fm_recommend.active || room->pending_recommend)
+        return 1;
+    if (!force && room->fm_recommend.retry_after > time(NULL))
+        return 0;
+    room->fm_recommend.tried_count = 0;
+    room->fm_recommend.attempt = 0;
+    room->fm_recommend.retry_after = 0;
+    return request_fm_recommend(room);
+}
+
+// 一次 216 失败：换人；全部失败后回退旧算法（不等待、不 sleep）
+static void handle_fm_recommend_failure(rooms_t *room, const char *reason)
+{
+    if (!room || !room->fm_recommend.active)
+        return;
+    room->fm_recommend.active = 0;
+    room->fm_recommend.target_userid[0] = '\0';
+    lws_sul_cancel(&room->fm_timer);
+    lwsl_notice("FM recommend failed (%s): room=%s, tried=%d\n",
+                reason ? reason : "-", room->room_id, room->fm_recommend.tried_count);
+
+    int has_current = (room->current_song != NULL);
+    int has_pending = (room->pending_recommend != NULL);
+    int remaining = count_pending_songs(room);
+    if (!has_current && has_pending)
+    {
+        if (consume_pending_recommend(room))
+            broadcast_room_state(room);
+        has_current = 1;
+    }
+    if (has_current || has_pending || remaining > 0)
+    {
+        room->fm_recommend.tried_count = 0;
+        room->fm_recommend.attempt = 0;
+        room->fm_recommend.retry_after = time(NULL) + 10;
+        return;
+    }
+
+    if (request_fm_recommend(room))
+        return;
+
+    // 没有更多可问的客户端：回退旧的系统推荐
+    room->fm_recommend.tried_count = 0;
+    room->fm_recommend.attempt = 0;
+    room->fm_recommend.retry_after = time(NULL) + 10;
+    if (auto_recommend_song(room) >= 0)
+        broadcast_room_state(room);
+}
+
+// 217 回包：校验 request_id/userid，只把歌曲放入 pending，不直接插入队列
+static void handle_fm_recommend_response(client_info_t *client, cJSON *params)
+{
+    if (!client || !client->room || !cJSON_IsObject(params))
+        return;
+    rooms_t *room = client->room;
+    cJSON *rid = cJSON_GetObjectItem(params, "request_id");
+    if (!room->fm_recommend.active || !cJSON_IsString(rid) ||
+        strcmp(rid->valuestring, room->fm_recommend.request_id) != 0 ||
+        strcmp(client->userId, room->fm_recommend.target_userid) != 0)
+    {
+        lwsl_notice("FM recommend response ignored (stale/unmatched): room=%s user=%s\n",
+                    room->room_id, client->userId);
+        return;
+    }
+
+    cJSON *failed = cJSON_GetObjectItem(params, "failed");
+    if (cJSON_IsTrue(failed))
+    {
+        handle_fm_recommend_failure(room, "client_failed");
+        return;
+    }
+
+    cJSON *songs = cJSON_GetObjectItem(params, "songs");
+    if (!cJSON_IsArray(songs) || cJSON_GetArraySize(songs) <= 0)
+    {
+        handle_fm_recommend_failure(room, "empty");
+        return;
+    }
+
+    playlist_t *picked = NULL;
+    int count = cJSON_GetArraySize(songs);
+    for (int i = 0; i < count; i++)
+    {
+        cJSON *s = cJSON_GetArrayItem(songs, i);
+        if (!cJSON_IsObject(s))
+            continue;
+        cJSON *name = cJSON_GetObjectItem(s, "songname");
+        cJSON *hash = cJSON_GetObjectItem(s, "songhash");
+        if (!cJSON_IsString(name) || !name->valuestring[0] ||
+            !cJSON_IsString(hash) || !hash->valuestring[0])
+            continue;
+        if (is_song_hash_in_playlist(room, hash->valuestring))
+            continue;
+        pthread_mutex_lock(&room->lock);
+        int pending_same = room->pending_recommend &&
+                           strcmp(room->pending_recommend->song_hash, hash->valuestring) == 0;
+        pthread_mutex_unlock(&room->lock);
+        if (pending_same)
+            continue;
+
+        picked = (playlist_t *)calloc(1, sizeof(playlist_t));
+        if (!picked)
+            break;
+        copy_utf8_bounded(picked->song_name, name->valuestring, sizeof(picked->song_name));
+        copy_utf8_bounded(picked->song_hash, hash->valuestring, sizeof(picked->song_hash));
+        cJSON *singer = cJSON_GetObjectItem(s, "singername");
+        cJSON *album = cJSON_GetObjectItem(s, "album_name");
+        cJSON *duration = cJSON_GetObjectItem(s, "duration");
+        cJSON *cover = cJSON_GetObjectItem(s, "cover_url");
+        cJSON *mxid = cJSON_GetObjectItem(s, "mxid");
+        if (cJSON_IsString(singer)) copy_utf8_bounded(picked->singer_name, singer->valuestring, sizeof(picked->singer_name));
+        if (cJSON_IsString(album)) copy_utf8_bounded(picked->album_name, album->valuestring, sizeof(picked->album_name));
+        if (cJSON_IsString(duration)) copy_utf8_bounded(picked->duration, duration->valuestring, sizeof(picked->duration));
+        if (cJSON_IsString(cover)) copy_utf8_bounded(picked->cover_url, cover->valuestring, sizeof(picked->cover_url));
+        if (cJSON_IsString(mxid)) copy_utf8_bounded(picked->mxid, mxid->valuestring, sizeof(picked->mxid));
+        copy_utf8_bounded(picked->added_by_nickname, client->nickname, sizeof(picked->added_by_nickname));
+        copy_utf8_bounded(picked->added_by_avatar, client->avatar_url, sizeof(picked->added_by_avatar));
+        copy_utf8_bounded(picked->recommend_source, "私人FM", sizeof(picked->recommend_source));
+        picked->is_system = 1;
+        picked->next = NULL;
+        break;
+    }
+
+    if (!picked)
+    {
+        lwsl_notice("FM recommend no candidate: room=%s\n", room->room_id);
+        handle_fm_recommend_failure(room, "no_candidate");
+        return;
+    }
+
+    pthread_mutex_lock(&room->lock);
+    if (room->pending_recommend)
+    {
+        room->fm_recommend.active = 0;
+        room->fm_recommend.target_userid[0] = '\0';
+        room->fm_recommend.tried_count = 0;
+        room->fm_recommend.attempt = 0;
+        pthread_mutex_unlock(&room->lock);
+        free(picked);
+        lws_sul_cancel(&room->fm_timer);
+        return;
+    }
+    room->pending_recommend = picked;
+    room->fm_recommend.active = 0;
+    room->fm_recommend.target_userid[0] = '\0';
+    room->fm_recommend.tried_count = 0;
+    room->fm_recommend.attempt = 0;
+    room->fm_recommend.retry_after = 0;
+    pthread_mutex_unlock(&room->lock);
+    lws_sul_cancel(&room->fm_timer);
+
+    lwsl_notice("FM recommend pending: room=%s song=%s by=%s\n",
+                room->room_id, picked->song_name, client->nickname);
+    // 当前没歌才立即消费；还有歌就等播完（不插队、不广播）
+    if (consume_pending_recommend(room))
+        broadcast_room_state(room);
+}
+
+// 需要新歌时的统一入口：pending -> 客户端 FM -> 旧系统推荐
+int ensure_room_recommendation(rooms_t *room)
+{
+    if (!room)
+        return -1;
+    if (room->pending_recommend)
+    {
+        if (consume_pending_recommend(room))
+            return 0;
+    }
+    if (start_fm_recommend(room, 1))
+        return 0;
+    return auto_recommend_song(room);
 }
 
 // 单条消息的处理（入参 msg 已经是完整的一条 JSON，NUL 结尾）
@@ -949,9 +1268,20 @@ static int handle_client_message(client_info_t *client, const char *msg, size_t 
         if (cJSON_IsObject(params))
         {
             cJSON *like_hash = cJSON_GetObjectItem(params, "songhash");
-            if (cJSON_IsString(like_hash) && like_hash->valuestring[0] &&
-                toggle_song_like(client, like_hash->valuestring) >= 0)
+            int like_state = -1;
+            char like_song_name[128] = {0};
+            if (cJSON_IsString(like_hash) && like_hash->valuestring[0])
+                like_state = toggle_song_like(client, like_hash->valuestring, like_song_name, sizeof(like_song_name));
+
+            if (like_state >= 0)
             {
+                char like_msg[256] = {0};
+                if (like_state == 1)
+                    snprintf(like_msg, sizeof(like_msg), "点赞了《%s》", like_song_name);
+                else
+                    snprintf(like_msg, sizeof(like_msg), "取消了《%s》的点赞", like_song_name);
+                init_room_action(client->room, client->userId, client->nickname, client->avatar_url, LIKE_SONG, like_msg);
+
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 const char *actions_json = get_room_actions_json(client->room, 1);
                 char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
@@ -970,6 +1300,12 @@ static int handle_client_message(client_info_t *client, const char *msg, size_t 
             error_response(client, "参数错误");
         }
         break;
+    case SUBMIT_FM_RECOMMEND:
+        if (cJSON_IsObject(params))
+            handle_fm_recommend_response(client, params);
+        else
+            error_response(client, "参数错误");
+        break;
     case REMOVE_SONG_FROM_PLAYLIST:
         if (cJSON_IsObject(params))
         {
@@ -977,7 +1313,8 @@ static int handle_client_message(client_info_t *client, const char *msg, size_t 
             if (cJSON_IsString(rm_hash) && remove_song_from_playlist(client, rm_hash->valuestring) >= 0)
             {
                 monitor_emit_song_op(client, "song_remove", rm_hash->valuestring);
-                const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                // 删除当前歌后可能立刻插入 pending/回退推荐，必须连 song_info 一起广播
+                const char *cur_playlist_json = get_playlist_and_song_info_json(client->room);
                 const char *actions_json = get_room_actions_json(client->room, 1);
                 char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
                 broadcast_response_room(client->room, combined ? combined : cur_playlist_json);

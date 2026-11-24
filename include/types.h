@@ -17,6 +17,7 @@ typedef struct playlist
     char is_system; // 0=用户添加, 1=系统推荐
     char mxid[24];  // 评论用 album_audio_id：切歌时懒解析回填，客户端免按歌名搜索
     int like_count; // 点赞数（房间级 song_like_t 链表维护，房间内共享）
+    char recommend_source[64]; // 推荐来源标签（热歌榜/每日推荐/AI 推荐/私人FM）
     struct playlist *next;
 } playlist_t;
 // 正在播放的歌曲信息
@@ -31,6 +32,8 @@ typedef struct playing_info
     char duration[16];
     char cover_url[512];
     char mxid[24]; // 当前歌的 album_audio_id（随歌曲信息广播）
+    char added_by_nickname[128]; // 点歌/推荐人昵称（一起听状态文案）
+    char recommend_source[64];   // 推荐来源（系统/私人FM）
     double played_percent;
     char is_playing;
     time_t last_update_time;
@@ -39,6 +42,8 @@ typedef struct playing_info
 } playing_info_t;
 // 客户端信息
 #define CLIENT_MSG_QUEUE_SIZE 8
+// 一次推荐最多询问几个不同客户端；全部超时/失败后回退旧算法
+#define FM_RECOMMEND_MAX_TRIES 3
 // 单条消息（把所有分片算在一起）的上限：批量加歌 500 首约 75KB，留足余量
 #define MAX_RX_MESSAGE (512 * 1024)
 typedef struct client_info
@@ -49,6 +54,7 @@ typedef struct client_info
     char userId[64];
     char nickname[128];
     char avatar_url[512];
+    char fm_ready; // 1 = 客户端已登录且支持代拉个人FM，可接收 216 请求
     char *msg_queue[CLIENT_MSG_QUEUE_SIZE]; // 动态分配的消息队列
     int msg_queue_head;
     int msg_queue_count;
@@ -94,6 +100,18 @@ typedef struct rooms
     playlist_t *current_song;
     room_ctrl_t *room_ctrl_head;
     song_like_t *likes; // 房间内所有歌曲点赞，按 song_hash + userid 去重
+    playlist_t *pending_recommend; // 已预取、等待队列空时插入的推荐歌曲（不广播、不计入队列）
+    struct
+    {
+        int active;                 // 1 = 已发 216，正在等客户端 217（不阻塞事件循环）
+        char request_id[64];
+        char target_userid[64];
+        char tried_userids[FM_RECOMMEND_MAX_TRIES][64];
+        int tried_count;
+        int attempt;
+        time_t retry_after;         // 本轮失败后的冷却时间，避免每个 tick 重试
+    } fm_recommend;
+    lws_sorted_usec_list_t fm_timer; // 216 回复超时定时器（lws 事件循环，非阻塞）
     playing_info_t playing_info;
     // 系统推荐去重
     char recommended_hashes[50][128];
@@ -123,6 +141,9 @@ enum ctrl
     // 追加在枚举末尾以保持既有动作编号不变（老客户端不受影响）
     ADD_SONGS_TO_PLAYLIST,
     LIKE_SONG,
+    // 一起听 FM 推荐：服务端 216 请求客户端代拉个人FM，客户端 217 回传歌曲
+    REQUEST_FM_RECOMMEND,
+    SUBMIT_FM_RECOMMEND,
     SEND_CHAT = 300,
     BROADCAST_CHAT,
     BROADCAST_ROOM_ACTION,

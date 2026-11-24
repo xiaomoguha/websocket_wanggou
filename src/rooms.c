@@ -196,6 +196,13 @@ void remove_room_node(rooms_t *head, rooms_t *node)
 {
     // 取消该房间的定时器
     lws_sul_cancel(&node->playing_info.timer);
+    lws_sul_cancel(&node->fm_timer);
+    // 释放预取的 FM 推荐歌曲（不在播放列表里，单独释放）
+    if (node->pending_recommend)
+    {
+        free(node->pending_recommend);
+        node->pending_recommend = NULL;
+    }
     // 先释放播放列表链表
     playlist_t *cur = node->playlist_head;
     while (cur != NULL)
