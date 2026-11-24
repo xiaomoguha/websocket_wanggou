@@ -73,3 +73,8 @@ build/.cmake/api/v1/reply/cache-v2-20642ff90a2de9ad475a.json
 build/.cmake/api/v1/query/client-vscode/query.json
 build/compile_commands.json
 .DS_Store
+/CMakeFiles/
+/Makefile
+/monitor-events/
+*.bak_*
+*.bak.*
