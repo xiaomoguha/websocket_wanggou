@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include "playlist.h"
 #include "utf8.h"
+#include "monitor_events.h" // 监控事件外发（纯记录，不影响业务）
 
 int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len);
 
@@ -95,6 +96,7 @@ static void broadcast_response_room(rooms_t *room, const char *msg)
     room->latest_msg = strdup(msg);
     room->broadcast_version++;
     pthread_mutex_unlock(&room->lock);
+    monitor_emit_ws_broadcast(room, msg);
 
     // 遍历所有用户
     for (client_info_t *cur = room->client_info->next; cur; cur = cur->next)
@@ -149,6 +151,7 @@ static void operation_response(client_info_t *client, const char *msg)
     client->room->latest_msg = strdup(msg);
     client->room->broadcast_version++;
     pthread_mutex_unlock(&client->room->lock);
+    monitor_emit_ws_broadcast(client->room, msg);
 
     // 遍历该房间客户端链表，唤醒对应客户端发送信息（除创建者）
     for (client_info_t *cur = client->room->client_info->next; cur != NULL; cur = cur->next)
@@ -280,6 +283,7 @@ void timer_callback(lws_sorted_usec_list_t *sul)
         if (song_changed)
         {
             // 切歌，广播歌曲信息 + 播放列表（系统推荐会改变列表）
+            monitor_emit_song_change(playing_info->room, "system_auto", NULL);
             const char *combined = get_playlist_and_song_info_json(playing_info->room);
             const char *actions_json = get_room_actions_json(playing_info->room, 1);
             char *final = combine_json_with_actions(combined, actions_json);
@@ -297,6 +301,7 @@ void timer_callback(lws_sorted_usec_list_t *sul)
         }
     }
 
+    monitor_tick_room(playing_info->room); // 进度（节流）与房间快照事件
     lws_sul_schedule(context, 0, sul, timer_callback, callback_time * LWS_US_PER_MS);
 }
 
@@ -374,6 +379,7 @@ static int client_callback_established(struct lws *wsi)
             }
             lws_set_opaque_user_data(wsi, new_client);
             lwsl_notice("客户端加入房间: %s\n", roomid);
+            monitor_emit_join(roomid, new_client);
             // 如果房间没有歌曲，自动推荐一首
             if (!room->current_song && !room->playlist_head->next)
             {
@@ -420,6 +426,7 @@ static int client_callback_established(struct lws *wsi)
         lwsl_err("Failed to create new room\n");
         return -1;
     }
+    monitor_emit_room_create(new_room, userId, nickname, client_ip);
     lwsl_notice("创建房间成功，启动定时器\n");
     lws_sul_schedule(context, 0, &new_room->playing_info.timer, timer_callback, LWS_US_PER_SEC * 5);
     // 自动推荐第一首歌
@@ -431,6 +438,7 @@ static int client_callback_established(struct lws *wsi)
     }
     lws_set_opaque_user_data(wsi, new_client);
     lwsl_notice("客户端加入房间: %s\n", roomid);
+    monitor_emit_join(roomid, new_client);
     // 打印房间信息以及客户端信息
     for (rooms_t *room = g_rooms_list->next; room != NULL; room = room->next)
     {
@@ -500,6 +508,7 @@ static int client_callback_closed(struct lws *wsi)
         char leave_msg[256] = {0};
         snprintf(leave_msg, sizeof(leave_msg), "离开了房间");
         init_room_action(room, client->userId, client->nickname, client->avatar_url, BROADCAST_ROOM_ACTION, leave_msg);
+        monitor_emit_leave(room, client);
 
         const char *actions_json = get_room_actions_json(room, 1);
         const char *client_list_json = get_client_list_json(room, BROADCAST_CLIENT_LIST);
@@ -514,6 +523,7 @@ static int client_callback_closed(struct lws *wsi)
         {
             free(client->msg_queue[i]);
         }
+        free(client->rx_buf); // 接收分片缓冲
         free(client);
         lwsl_notice("客户端信息已清理\n");
     }
@@ -522,6 +532,8 @@ static int client_callback_closed(struct lws *wsi)
     // 如果房间已经没有客户端，则删除房间信息
     if (room && room->client_counter == 0)
     {
+        monitor_emit_room_destroy(room->room_id);
+        monitor_forget_room(room);
         remove_room_node(g_rooms_list, room);
         lwsl_notice("房间信息已清理\n");
     }
@@ -586,11 +598,71 @@ static void success_response(client_info_t *client, const char *msg)
     send_message_to_client(client, json_str);
     free(json_str);
 }
+
+// 带 action 的成功回执：客户端按 action 分发（批量加歌要靠它区分回包并提示结果）
+static void success_response_with_action(client_info_t *client, const char *msg, int action)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+        return;
+
+    cJSON_AddNumberToObject(root, "error_code", SUCCESS);
+    cJSON_AddStringToObject(root, "status", "success");
+    cJSON_AddStringToObject(root, "message", msg);
+    cJSON_AddNumberToObject(root, "action", action);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    send_message_to_client(client, json_str);
+    free(json_str);
+}
+
+// 批量加歌结果文案：成功时说清"加了几首"，以及丢弃/重复/失败各多少；
+// 一首都没加成时说清是哪一类原因
+static void build_batch_summary(char *buf, size_t len, int added, int dropped, int duplicate, int failed)
+{
+    size_t used = 0;
+    if (added > 0)
+    {
+        int w = snprintf(buf, len, "已添加 %d 首到一起听", added);
+        if (w > 0)
+            used = (size_t)w;
+        if (used < len && dropped > 0)
+        {
+            w = snprintf(buf + used, len - used, "；%d 首超出上限（房间未播放最多 %d 首）已丢弃",
+                         dropped, MAX_PENDING_SONGS);
+            if (w > 0)
+                used += (size_t)w;
+        }
+        if (used < len && duplicate > 0)
+        {
+            w = snprintf(buf + used, len - used, "；%d 首已在列表中", duplicate);
+            if (w > 0)
+                used += (size_t)w;
+        }
+        if (used < len && failed > 0)
+        {
+            w = snprintf(buf + used, len - used, "；%d 首添加失败", failed);
+            if (w > 0)
+                used += (size_t)w;
+        }
+        return;
+    }
+
+    if (dropped > 0)
+        snprintf(buf, len, "房间未播放歌曲已达上限 %d 首，本次未添加", MAX_PENDING_SONGS);
+    else if (duplicate > 0)
+        snprintf(buf, len, "这些歌曲都已在一起听列表中");
+    else
+        snprintf(buf, len, "加歌失败，请稍后重试");
+}
 // 某客户端单独发送信息（入队，动态分配）
 static void send_message_to_client(client_info_t *client, const char *msg)
 {
     if (!client || !msg)
         return;
+    monitor_emit_ws_send(client, msg);
     pthread_mutex_lock(&client->lock);
     if (client->msg_queue_count < CLIENT_MSG_QUEUE_SIZE)
     {
@@ -610,16 +682,11 @@ static void send_message_to_client(client_info_t *client, const char *msg)
     lws_cancel_service(context);
 }
 
-static int client_callback_receive(struct lws *wsi, void *in, size_t len)
+// 单条消息的处理（入参 msg 已经是完整的一条 JSON，NUL 结尾）
+static int handle_client_message(client_info_t *client, const char *msg, size_t len)
 {
-    client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
-    if (!client)
-    {
-        lwsl_err("Client info is NULL\n");
-        return -1;
-    }
     // 复制到本地缓冲区，避免修改 libwebsockets 的只读输入缓冲区
-    if (len >= 65536)
+    if (len >= MAX_RX_MESSAGE)
     {
         lwsl_err("消息过长，丢弃 (长度: %zu)\n", len);
         return 0;
@@ -630,7 +697,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         lwsl_err("内存分配失败\n");
         return 0;
     }
-    memcpy(msg_buf, in, len);
+    memcpy(msg_buf, msg, len);
     msg_buf[len] = '\0';
     lwsl_notice("收到%s消息: %s (长度: %zu)\n", client->ip, msg_buf, len);
 
@@ -640,13 +707,13 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     {
         const char *error_ptr = cJSON_GetErrorPtr();
         {
-            char msg[128] = {0};
+            char msg2[128] = {0};
             if (error_ptr)
-                snprintf(msg, sizeof(msg), "JSON 解析错误:%s", error_ptr);
+                snprintf(msg2, sizeof(msg2), "JSON 解析错误:%s", error_ptr);
             else
-                snprintf(msg, sizeof(msg), "JSON 解析错误");
+                snprintf(msg2, sizeof(msg2), "JSON 解析错误");
             lwsl_err("JSON 解析错误: %s\n", error_ptr ? error_ptr : "unknown");
-            error_response(client, msg);
+            error_response(client, msg2);
         }
         return 0;
     }
@@ -672,6 +739,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         error_response(client, "userid错误！");
         return 0;
     }
+    monitor_emit_ws_in(client, root); // 记录客户端请求（人类可读摘要）
     switch (action->valueint)
     {
     case GET_CUR_SONG_INFO:
@@ -684,6 +752,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case PLAY_NEXT_SONG:
         if (play_next_song(client) >= 0)
         {
+            monitor_emit_song_change(client->room, "manual_next", client);
             const char *combined_json = get_playlist_and_song_info_json(client->room);
             const char *actions_json = get_room_actions_json(client->room, 1);
             // 操作者收到 playlist + 操作日志
@@ -717,6 +786,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             {
                 if (playbysonghash(client, songhash->valuestring) >= 0)
                 {
+                    monitor_emit_song_change(client->room, "play_hash", client);
                     const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
                     const char *actions_json = get_room_actions_json(client->room, 1);
                     char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
@@ -740,6 +810,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case PAUSE_SONG:
         if (pause_song(client) >= 0)
         {
+            monitor_emit_play_state(client, 0);
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
             const char *actions_json = get_room_actions_json(client->room, 1);
             char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
@@ -756,6 +827,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
     case RESUME_SONG:
         if (resume_song(client) >= 0)
         {
+            monitor_emit_play_state(client, 1);
             const char *cur_song_info_json = get_cur_song_info(client->room, BROADCAST_SONG_INFO);
             const char *actions_json = get_room_actions_json(client->room, 1);
             char *combined = combine_json_with_actions(cur_song_info_json, actions_json);
@@ -781,6 +853,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             int ins_ret = insert_song_to_playlist(client, songname, songhash, singername, albumname, duration, coverurl);
             if (ins_ret >= 0)
             {
+                monitor_emit_song_add(client, songname, songhash, singername, albumname, duration, coverurl);
                 client->room->last_user_add_time = time(NULL); // 用户加歌刷新空闲计时（系统推荐不刷新）
                 // 操作者收到 playlist + 操作日志
                 const char *playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
@@ -818,12 +891,92 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             error_response(client, "参数错误！");
         }
         break;
+    case ADD_SONGS_TO_PLAYLIST:
+        // 批量加歌（客户端「添加到一起听」）：params.songs 为歌曲数组
+        if (cJSON_IsObject(params))
+        {
+            cJSON *songs = cJSON_GetObjectItem(params, "songs");
+            if (!cJSON_IsArray(songs))
+            {
+                error_response_with_action(client, "参数错误！", ADD_SONGS_TO_PLAYLIST);
+                break;
+            }
+
+            int added = 0, dropped = 0, duplicate = 0, failed = 0;
+            insert_songs_to_playlist(client, songs, &added, &dropped, &duplicate, &failed);
+
+            char summary[512] = {0};
+            build_batch_summary(summary, sizeof(summary), added, dropped, duplicate, failed);
+
+            if (added > 0)
+            {
+                client->room->last_user_add_time = time(NULL); // 用户加歌刷新空闲计时
+                // 操作者：结果提示 + playlist + 操作日志
+                success_response_with_action(client, summary, ADD_SONGS_TO_PLAYLIST);
+                const char *playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                send_message_to_client(client, playlist_json);
+                const char *operator_actions = get_room_actions_json(client->room, 1);
+                if (operator_actions)
+                {
+                    send_message_to_client(client, operator_actions);
+                    free((void *)operator_actions);
+                }
+                free((void *)playlist_json);
+
+                // 其他客户端：playlist + song_info + 操作日志（合并一条，避免互相覆盖）
+                const char *combined_json = get_playlist_and_song_info_json(client->room);
+                const char *actions_json = get_room_actions_json(client->room, 1);
+                char *final = combine_json_with_actions(combined_json, actions_json);
+                const char *broadcast_msg = final ? final : combined_json;
+
+                broadcast_response_room(client->room, broadcast_msg);
+                free(final);
+                free((void *)combined_json);
+                free((void *)actions_json);
+            }
+            else
+            {
+                // 一首都没加成：把原因（重复/超上限/失败）回给操作者
+                error_response_with_action(client, summary, ADD_SONGS_TO_PLAYLIST);
+            }
+        }
+        else
+        {
+            error_response(client, "参数错误！");
+        }
+        break;
+    case LIKE_SONG:
+        if (cJSON_IsObject(params))
+        {
+            cJSON *like_hash = cJSON_GetObjectItem(params, "songhash");
+            if (cJSON_IsString(like_hash) && like_hash->valuestring[0] &&
+                toggle_song_like(client, like_hash->valuestring) >= 0)
+            {
+                const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
+                const char *actions_json = get_room_actions_json(client->room, 1);
+                char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
+                broadcast_response_room(client->room, combined ? combined : cur_playlist_json);
+                free(combined);
+                free((void *)cur_playlist_json);
+                free((void *)actions_json);
+            }
+            else
+            {
+                error_response_with_action(client, "点赞失败", LIKE_SONG);
+            }
+        }
+        else
+        {
+            error_response(client, "参数错误");
+        }
+        break;
     case REMOVE_SONG_FROM_PLAYLIST:
         if (cJSON_IsObject(params))
         {
             cJSON *rm_hash = cJSON_GetObjectItem(params, "songhash");
             if (cJSON_IsString(rm_hash) && remove_song_from_playlist(client, rm_hash->valuestring) >= 0)
             {
+                monitor_emit_song_op(client, "song_remove", rm_hash->valuestring);
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 const char *actions_json = get_room_actions_json(client->room, 1);
                 char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
@@ -848,6 +1001,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
             cJSON *up_hash = cJSON_GetObjectItem(params, "songhash");
             if (cJSON_IsString(up_hash) && upsongbyhash(client, up_hash->valuestring) >= 0)
             {
+                monitor_emit_song_op(client, "song_pin", up_hash->valuestring);
                 const char *cur_playlist_json = get_playlist_json(client->room, BROADCAST_SONG_LIST);
                 const char *actions_json = get_room_actions_json(client->room, 1);
                 char *combined = combine_json_with_actions(cur_playlist_json, actions_json);
@@ -901,6 +1055,7 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
                 free(chat_json);
                 // 存入操作历史，供新加入用户查看
                 init_room_action(client->room, client->userId, client->nickname, client->avatar_url, SEND_CHAT, msg_item->valuestring);
+                monitor_emit_chat(client, msg_item->valuestring);
             }
             else
             {
@@ -915,6 +1070,47 @@ static int client_callback_receive(struct lws *wsi, void *in, size_t len)
         break;
     }
     return 0;
+}
+
+// 接收回调：libwebsockets 会按接收缓冲把大消息切成多个分片回调
+// （批量加歌 300 首的 JSON 约几十 KB，必然分片），这里先把分片累积起来，
+// 到最后一个分片再当成一条完整消息处理；不这样做每个分片都会被当成独立消息 →
+// JSON 解析错误。单分片的小消息（绝大多数请求）行为与原来完全一致。
+static int client_callback_receive(struct lws *wsi, void *in, size_t len)
+{
+    client_info_t *client = (client_info_t *)lws_get_opaque_user_data(wsi);
+    if (!client)
+    {
+        lwsl_err("Client info is NULL\n");
+        return -1;
+    }
+
+    if (client->rx_len + len > MAX_RX_MESSAGE)
+    {
+        lwsl_err("消息过长，丢弃 (累计: %zu)\n", client->rx_len + len);
+        client->rx_len = 0;
+        error_response(client, "消息过长");
+        return 0;
+    }
+
+    char *grown = (char *)realloc(client->rx_buf, client->rx_len + len + 1);
+    if (!grown)
+    {
+        lwsl_err("内存分配失败\n");
+        client->rx_len = 0;
+        return 0;
+    }
+    client->rx_buf = grown;
+    memcpy(client->rx_buf + client->rx_len, in, len);
+    client->rx_len += len;
+    client->rx_buf[client->rx_len] = '\0';
+
+    if (!lws_is_final_fragment(wsi))
+        return 0; // 还有后续分片
+
+    const size_t total = client->rx_len;
+    client->rx_len     = 0; // 事件循环单线程，处理期间不会再进本回调
+    return handle_client_message(client, client->rx_buf, total);
 }
 
 static int client_callback_wirtable(struct lws *wsi)
@@ -1157,6 +1353,7 @@ int main(int argc, const char **argv)
 
     curl_global_init(CURL_GLOBAL_ALL);
     srand((unsigned int)time(NULL));
+    monitor_events_init(); // 监控事件文件（纯记录，失败不影响服务）
 
     g_rooms_list = init_rooms();
     if (!g_rooms_list)

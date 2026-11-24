@@ -205,6 +205,15 @@ void remove_room_node(rooms_t *head, rooms_t *node)
         cur = next;
     }
     node->playlist_head = NULL;
+    // free song likes
+    song_like_t *like = node->likes;
+    while (like != NULL)
+    {
+        song_like_t *lnext = like->next;
+        free(like);
+        like = lnext;
+    }
+    node->likes = NULL;
     // 释放房间操作链表
     free_room_action(node);
 

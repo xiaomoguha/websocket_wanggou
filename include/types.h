@@ -15,6 +15,8 @@ typedef struct playlist
     char added_by_nickname[128];
     char added_by_avatar[512];
     char is_system; // 0=用户添加, 1=系统推荐
+    char mxid[24];  // 评论用 album_audio_id：切歌时懒解析回填，客户端免按歌名搜索
+    int like_count; // 点赞数（房间级 song_like_t 链表维护，房间内共享）
     struct playlist *next;
 } playlist_t;
 // 正在播放的歌曲信息
@@ -28,6 +30,7 @@ typedef struct playing_info
     char album_name[128];
     char duration[16];
     char cover_url[512];
+    char mxid[24]; // 当前歌的 album_audio_id（随歌曲信息广播）
     double played_percent;
     char is_playing;
     time_t last_update_time;
@@ -36,6 +39,8 @@ typedef struct playing_info
 } playing_info_t;
 // 客户端信息
 #define CLIENT_MSG_QUEUE_SIZE 8
+// 单条消息（把所有分片算在一起）的上限：批量加歌 500 首约 75KB，留足余量
+#define MAX_RX_MESSAGE (512 * 1024)
 typedef struct client_info
 {
     struct lws *wsi;
@@ -50,6 +55,10 @@ typedef struct client_info
     unsigned int last_broadcast_version;
     struct client_info *next;
     struct client_info *prev;
+    // 接收分片缓冲：libwebsockets 按接收缓冲把大消息切成多次回调，
+    // 累到最后一个分片再解析（见 client_callback_receive）
+    char *rx_buf;
+    size_t rx_len;
     pthread_mutex_t lock;
 } client_info_t;
 // 房间操作信息
@@ -63,6 +72,13 @@ typedef struct room_ctrl
     time_t action_time;
     struct room_ctrl *next;
 } room_ctrl_t;
+// 歌曲点赞（房间级）：同一 song_hash + userid 只保留一条，取消点赞即删除
+typedef struct song_like
+{
+    char song_hash[128];
+    char userid[64];
+    struct song_like *next;
+} song_like_t;
 // 房间信息
 typedef struct rooms
 {
@@ -77,6 +93,7 @@ typedef struct rooms
     playlist_t *playlist_tail;
     playlist_t *current_song;
     room_ctrl_t *room_ctrl_head;
+    song_like_t *likes; // 房间内所有歌曲点赞，按 song_hash + userid 去重
     playing_info_t playing_info;
     // 系统推荐去重
     char recommended_hashes[50][128];
@@ -102,6 +119,10 @@ enum ctrl
     BROADCAST_CLIENT_LIST,
     GET_CLIENT_LIST,
     BROADCAST_SONG_PROGRESS,
+    // 批量加歌（客户端「添加到一起听」）：一条消息加一批，服务端只锁一次、只广播一次。
+    // 追加在枚举末尾以保持既有动作编号不变（老客户端不受影响）
+    ADD_SONGS_TO_PLAYLIST,
+    LIKE_SONG,
     SEND_CHAT = 300,
     BROADCAST_CHAT,
     BROADCAST_ROOM_ACTION,
