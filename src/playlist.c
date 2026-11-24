@@ -691,7 +691,7 @@ int insert_system_song(rooms_t *room, const char *song_name, const char *song_ha
 
     char message[256] = {0};
     const char *src_label = (recommend_source && recommend_source[0]) ? recommend_source : "AI 推荐";
-    snprintf(message, sizeof(message), "「%s」推荐了歌曲：%s", src_label, song_name);
+    snprintf(message, sizeof(message), "根据「%s」自动推荐", src_label);
     init_room_action(room, "system", "系统", "", BROADCAST_ROOM_ACTION, message);
 
     return 0;
@@ -729,10 +729,10 @@ int consume_pending_recommend(rooms_t *room)
     room->recommended_count++;
     pthread_mutex_unlock(&room->lock);
 
-    const char *by = song->added_by_nickname[0] ? song->added_by_nickname : "系统";
+    const char *by = song->added_by_nickname[0] ? song->added_by_nickname : "系统推荐";
     char message[256] = {0};
-    snprintf(message, sizeof(message), "%s 推荐了歌曲：%s", by, song->song_name);
-    init_room_action(room, "system", by, song->added_by_avatar, ADD_SONG_TO_PLAYLIST, message);
+    snprintf(message, sizeof(message), "根据「%s」风格自动推荐", by);
+    init_room_action(room, "system", "系统", "", ADD_SONG_TO_PLAYLIST, message);
     update_playing_info(room);
     return 1;
 }
