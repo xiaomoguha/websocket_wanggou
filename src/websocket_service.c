@@ -1487,8 +1487,14 @@ static int client_callback_wirtable(struct lws *wsi)
         free(client_msg);
         free(local_msg);
 
-        // 队列还有消息，继续触发可写回调
-        if (client->msg_queue_count > 0)
+        // 队列还有消息，或期间有新的房间广播尚未下发给本客户端，继续触发可写回调。
+        // 否则同一拍里"个人消息 + 房间广播"会让本客户端漏掉这条广播
+        // （例如定时器同一拍里下发 FM 推荐请求 216 并广播进度 213）。
+        pthread_mutex_lock(&client->room->lock);
+        int has_pending_broadcast = (client->room->broadcast_version != client->last_broadcast_version);
+        pthread_mutex_unlock(&client->room->lock);
+
+        if (client->msg_queue_count > 0 || has_pending_broadcast)
         {
             lws_callback_on_writable(wsi);
         }
